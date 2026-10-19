@@ -1013,6 +1013,77 @@ def _build_history_shapes(
     )
 
 
+def _decompose_annual_energy(
+    *,
+    annual_energy_upstream: str | Path,
+    industry_weight_evolution_path: str | Path,
+    year_values: tuple[int, ...],
+    scenario_values: tuple[str, ...],
+    method: str,
+    sample_energy: pd.DataFrame,
+    excluded_energy_ledger: pd.DataFrame,
+    envelope_factors: pd.DataFrame,
+):
+    """上游年度电量→24行业+修正组成的年电量分解与闭合（§3.3 步骤5）。"""
+    annual_energy = load_upstream_annual_energy(
+        annual_energy_upstream, years=year_values, method=method
+    )
+    annual_energy = annual_energy.loc[
+        annual_energy.scenario.astype(str).isin(scenario_values)
+    ].reset_index(drop=True)
+    scope_bridge = load_upstream_scope_bridge(
+        annual_energy_upstream, years=year_values, method=method
+    )
+    scope_bridge = scope_bridge.loc[
+        scope_bridge.planning_scenario.astype(str).isin(scenario_values)
+    ].reset_index(drop=True)
+    expected_bridge_rows = len(year_values) * len(scenario_values) * len(REPRESENTATIVE_TRACKS)
+    if len(scope_bridge) != expected_bridge_rows or scope_bridge.duplicated(
+        ["method", "planning_scenario", "year", "quantile"]
+    ).any():
+        raise AssertionError("自然负荷scope_bridge覆盖不完整或键不唯一")
+
+    official_2025 = excluded_energy_ledger.loc[
+        pd.to_numeric(excluded_energy_ledger.year).eq(2025)
+    ]
+    if len(official_2025) != 1:
+        raise AssertionError("三项排除电量台账必须恰有一条2025记录")
+    official_natural_2025_10k_kWh = float(
+        official_2025.iloc[0].natural_load_10k_kWh
+    )
+    official_natural_2025_MWh = float(official_2025.iloc[0].natural_load_MWh)
+    if 2025 in year_values:
+        anchor = scope_bridge.loc[pd.to_numeric(scope_bridge.year).eq(2025)]
+        if not np.isclose(
+            anchor.Q_natural_MWh,
+            official_natural_2025_MWh,
+            rtol=1e-10,
+            atol=1e-3,
+        ).all():
+            raise AssertionError("上游2025自然负荷与官方三项扣除台账不一致")
+    evolution = load_industry_weight_evolution(industry_weight_evolution_path)
+    component_energy, component_energy_closure = build_industry_annual_energy(
+        annual_energy,
+        sample_energy,
+        official_natural_total_2025=official_natural_2025_10k_kWh,
+        evolution=evolution,
+    )
+    proxy_sector_weights = build_proxy_sector_weights(component_energy)
+    target_month_energy = build_target_month_energy_table(
+        annual_energy, envelope_factors
+    )
+    return (
+        annual_energy,
+        scope_bridge,
+        evolution,
+        official_2025,
+        component_energy,
+        component_energy_closure,
+        proxy_sector_weights,
+        target_month_energy,
+    )
+
+
 def run_pipeline(
     *,
     years: Iterable[int],
@@ -1092,52 +1163,24 @@ def run_pipeline(
         year_values=year_values,
     )
 
-    annual_energy = load_upstream_annual_energy(
-        annual_energy_upstream, years=year_values, method=method
-    )
-    annual_energy = annual_energy.loc[
-        annual_energy.scenario.astype(str).isin(scenario_values)
-    ].reset_index(drop=True)
-    scope_bridge = load_upstream_scope_bridge(
-        annual_energy_upstream, years=year_values, method=method
-    )
-    scope_bridge = scope_bridge.loc[
-        scope_bridge.planning_scenario.astype(str).isin(scenario_values)
-    ].reset_index(drop=True)
-    expected_bridge_rows = len(year_values) * len(scenario_values) * len(REPRESENTATIVE_TRACKS)
-    if len(scope_bridge) != expected_bridge_rows or scope_bridge.duplicated(
-        ["method", "planning_scenario", "year", "quantile"]
-    ).any():
-        raise AssertionError("自然负荷scope_bridge覆盖不完整或键不唯一")
-
-    official_2025 = excluded_energy_ledger.loc[
-        pd.to_numeric(excluded_energy_ledger.year).eq(2025)
-    ]
-    if len(official_2025) != 1:
-        raise AssertionError("三项排除电量台账必须恰有一条2025记录")
-    official_natural_2025_10k_kWh = float(
-        official_2025.iloc[0].natural_load_10k_kWh
-    )
-    official_natural_2025_MWh = float(official_2025.iloc[0].natural_load_MWh)
-    if 2025 in year_values:
-        anchor = scope_bridge.loc[pd.to_numeric(scope_bridge.year).eq(2025)]
-        if not np.isclose(
-            anchor.Q_natural_MWh,
-            official_natural_2025_MWh,
-            rtol=1e-10,
-            atol=1e-3,
-        ).all():
-            raise AssertionError("上游2025自然负荷与官方三项扣除台账不一致")
-    evolution = load_industry_weight_evolution(industry_weight_evolution_path)
-    component_energy, component_energy_closure = build_industry_annual_energy(
+    (
         annual_energy,
-        sample_energy,
-        official_natural_total_2025=official_natural_2025_10k_kWh,
-        evolution=evolution,
-    )
-    proxy_sector_weights = build_proxy_sector_weights(component_energy)
-    target_month_energy = build_target_month_energy_table(
-        annual_energy, envelope_factors
+        scope_bridge,
+        evolution,
+        official_2025,
+        component_energy,
+        component_energy_closure,
+        proxy_sector_weights,
+        target_month_energy,
+    ) = _decompose_annual_energy(
+        annual_energy_upstream=annual_energy_upstream,
+        industry_weight_evolution_path=industry_weight_evolution_path,
+        year_values=year_values,
+        scenario_values=scenario_values,
+        method=method,
+        sample_energy=sample_energy,
+        excluded_energy_ledger=excluded_energy_ledger,
+        envelope_factors=envelope_factors,
     )
 
     if "is_future_baseline" in baseline_shapes.columns:
