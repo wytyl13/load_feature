@@ -1084,6 +1084,103 @@ def _decompose_annual_energy(
     )
 
 
+def _build_baseline_and_correction(
+    *,
+    baseline_shapes: pd.DataFrame,
+    system_history: pd.DataFrame,
+    excluded_energy_ledger: pd.DataFrame,
+    sample_mapping_path: str | Path,
+    official_mapping_path: str | Path,
+    official_workbook: str | Path,
+    future_parameters: pd.DataFrame,
+    component_energy: pd.DataFrame,
+):
+    """2023基准形状、修正组成与未来行业组成形状（§3.3 步骤6 及组成形状）。"""
+    if "is_future_baseline" in baseline_shapes.columns:
+        baseline_2023 = baseline_shapes.loc[
+            baseline_shapes.is_future_baseline.astype(bool)
+        ].copy()
+    elif "year" in baseline_shapes.columns:
+        baseline_2023 = baseline_shapes.loc[
+            pd.to_numeric(baseline_shapes.year).eq(2023)
+        ].copy()
+    else:
+        raise ValueError("行业基准形状缺少2023基准标识")
+    if baseline_2023.empty:
+        raise RuntimeError("2023行业聚合medoid基准为空")
+
+    actual_2023 = _system_history_year_hourly(system_history, 2023)
+    province_typical_2023 = historical_season_daytype_typical_shapes(actual_2023)
+    province_typical_2023 = province_typical_2023.rename(
+        columns={
+            "day_type": "day_group",
+            "normalized_load": "province_typical_share",
+        }
+    )
+    province_typical_2023["day_group"] = province_typical_2023.day_group.replace(
+        {"普通周末": "周末", "法定节假日": "节假日"}
+    )
+    official_2023 = excluded_energy_ledger.loc[
+        pd.to_numeric(excluded_energy_ledger.year).eq(2023)
+    ]
+    if len(official_2023) != 1:
+        raise AssertionError("三项排除电量台账必须恰有一条2023记录")
+    industry_energy_2023 = sample_industry_energy_year_frame(
+        2023,
+        sample_mapping_path=sample_mapping_path,
+        official_mapping_path=official_mapping_path,
+        official_workbook=official_workbook,
+    )
+    industry_energy_2023 = industry_energy_2023.loc[
+        industry_energy_2023.is_traditional.astype(bool)
+    ].copy()
+    base_year_industry_components = build_base_year_industry_components(
+        baseline_2023,
+        industry_energy_2023[["industry", "official_energy"]],
+        float(official_2023.iloc[0].natural_load_10k_kWh),
+    )
+    correction_weights_2023 = industry_energy_2023[
+        ["industry", "official_energy"]
+    ].copy()
+    correction_weights_2023["share"] = (
+        correction_weights_2023.official_energy
+        / float(official_2023.iloc[0].natural_load_10k_kWh)
+    )
+    correction_weights_2023["weight_year"] = 2023
+    correction = build_correction_artifacts(
+        province_typical_2023[
+            ["season", "day_group", "hour", "province_typical_share"]
+        ],
+        baseline_2023,
+        correction_weights_2023[["industry", "share", "weight_year"]],
+    )
+
+    future_industry_components = build_future_industry_components(
+        baseline_2023,
+        future_parameters,
+        component_energy,
+        horizon=FORMAL_HORIZON,
+        peak_valley_phi=FORMAL_PEAK_VALLEY_PHI,
+    )
+    future_total_component_shapes = compose_with_fixed_correction_shape(
+        future_industry_components,
+        correction.component,
+        context_columns=("method", "planning_scenario", "year"),
+    )
+    proxy_sector_typical_shapes = build_proxy_sector_typical_shapes(
+        future_industry_components
+    )
+    return (
+        baseline_2023,
+        province_typical_2023,
+        base_year_industry_components,
+        correction,
+        future_industry_components,
+        future_total_component_shapes,
+        proxy_sector_typical_shapes,
+    )
+
+
 def run_pipeline(
     *,
     years: Iterable[int],
@@ -1183,79 +1280,23 @@ def run_pipeline(
         envelope_factors=envelope_factors,
     )
 
-    if "is_future_baseline" in baseline_shapes.columns:
-        baseline_2023 = baseline_shapes.loc[
-            baseline_shapes.is_future_baseline.astype(bool)
-        ].copy()
-    elif "year" in baseline_shapes.columns:
-        baseline_2023 = baseline_shapes.loc[
-            pd.to_numeric(baseline_shapes.year).eq(2023)
-        ].copy()
-    else:
-        raise ValueError("行业基准形状缺少2023基准标识")
-    if baseline_2023.empty:
-        raise RuntimeError("2023行业聚合medoid基准为空")
-
-    actual_2023 = _system_history_year_hourly(system_history, 2023)
-    province_typical_2023 = historical_season_daytype_typical_shapes(actual_2023)
-    province_typical_2023 = province_typical_2023.rename(
-        columns={
-            "day_type": "day_group",
-            "normalized_load": "province_typical_share",
-        }
-    )
-    province_typical_2023["day_group"] = province_typical_2023.day_group.replace(
-        {"普通周末": "周末", "法定节假日": "节假日"}
-    )
-    official_2023 = excluded_energy_ledger.loc[
-        pd.to_numeric(excluded_energy_ledger.year).eq(2023)
-    ]
-    if len(official_2023) != 1:
-        raise AssertionError("三项排除电量台账必须恰有一条2023记录")
-    industry_energy_2023 = sample_industry_energy_year_frame(
-        2023,
+    (
+        baseline_2023,
+        province_typical_2023,
+        base_year_industry_components,
+        correction,
+        future_industry_components,
+        future_total_component_shapes,
+        proxy_sector_typical_shapes,
+    ) = _build_baseline_and_correction(
+        baseline_shapes=baseline_shapes,
+        system_history=system_history,
+        excluded_energy_ledger=excluded_energy_ledger,
         sample_mapping_path=sample_mapping_path,
         official_mapping_path=official_mapping_path,
         official_workbook=official_workbook,
-    )
-    industry_energy_2023 = industry_energy_2023.loc[
-        industry_energy_2023.is_traditional.astype(bool)
-    ].copy()
-    base_year_industry_components = build_base_year_industry_components(
-        baseline_2023,
-        industry_energy_2023[["industry", "official_energy"]],
-        float(official_2023.iloc[0].natural_load_10k_kWh),
-    )
-    correction_weights_2023 = industry_energy_2023[
-        ["industry", "official_energy"]
-    ].copy()
-    correction_weights_2023["share"] = (
-        correction_weights_2023.official_energy
-        / float(official_2023.iloc[0].natural_load_10k_kWh)
-    )
-    correction_weights_2023["weight_year"] = 2023
-    correction = build_correction_artifacts(
-        province_typical_2023[
-            ["season", "day_group", "hour", "province_typical_share"]
-        ],
-        baseline_2023,
-        correction_weights_2023[["industry", "share", "weight_year"]],
-    )
-
-    future_industry_components = build_future_industry_components(
-        baseline_2023,
-        future_parameters,
-        component_energy,
-        horizon=FORMAL_HORIZON,
-        peak_valley_phi=FORMAL_PEAK_VALLEY_PHI,
-    )
-    future_total_component_shapes = compose_with_fixed_correction_shape(
-        future_industry_components,
-        correction.component,
-        context_columns=("method", "planning_scenario", "year"),
-    )
-    proxy_sector_typical_shapes = build_proxy_sector_typical_shapes(
-        future_industry_components
+        future_parameters=future_parameters,
+        component_energy=component_energy,
     )
 
     assembly_closure_frames: list[pd.DataFrame] = []
