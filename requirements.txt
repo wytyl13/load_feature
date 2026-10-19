@@ -1,0 +1,30 @@
+# 环境说明(详见 README.md Quick Start):
+# - 日常运行(两模块)与课题2 全链路:anaconda base,Python 3.12.7,依赖已全部在位
+# - 课题1 基准复现与回归:conda 环境 load_feature,Python 3.13 + 本文件锁定版本
+#   (逐位一致判据只在锁定版本内成立,跨版本存在 1-ulp 浮点差异,见 DESIGN.md 决策记录)
+#
+# ---- 课题1《负荷特性主模型》(交付锁定版,逐位复现必需) ----
+attrs==26.1.0
+colorama==0.4.6
+et_xmlfile==2.0.0
+iniconfig==2.3.1
+numpy==2.2.6
+openpyxl==3.1.5
+packaging==26.3
+pandas==2.2.3
+pluggy==1.6.0
+pyarrow==19.0.1
+pytest==8.3.5
+pytest-subtests==0.14.1
+python-dateutil==2.9.0.post0
+pytz==2026.5
+six==1.17.0
+tzdata==2026.5
+#
+# ---- 课题2《负荷特性预测》(交付区间见 课题2_预测/requirements.txt;下为 base 实装版) ----
+scipy==1.13.1
+statsmodels==0.14.2
+scikit-learn==1.5.1
+matplotlib==3.9.2
+python-docx==1.2.0
+pyyaml==6.0.1

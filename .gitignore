@@ -1,0 +1,17 @@
+# 交付原始包与输入数据不入库
+交付包原始/
+自己处理/
+*.zip
+
+# 运行产物(基准 md5 清单在 baselines/,入库)
+**/results/
+**/验证结果_原始数据/
+
+# Python 缓存
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# 本地临时
+*.log
+.conda_env_313/
