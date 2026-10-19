@@ -1181,124 +1181,23 @@ def _build_baseline_and_correction(
     )
 
 
-def run_pipeline(
+def _run_scenario_year_loop(
     *,
-    years: Iterable[int],
-    output_dir: str | Path,
+    scenario_values: tuple[str, ...],
+    year_values: tuple[int, ...],
+    method: str,
+    component_energy: pd.DataFrame,
+    baseline_2023: pd.DataFrame,
+    day_type_factors: pd.DataFrame,
+    future_parameters: pd.DataFrame,
+    envelope_factors: pd.DataFrame,
+    correction_component: pd.DataFrame,
+    residual_library: pd.DataFrame,
     bootstrap_scenarios: int,
-    planning_scenarios: Sequence[str] = SCENARIO_ORDER,
-    method: str = ANNUAL_ENERGY_METHOD,
-    load_workbook: str | Path = DEFAULT_LOAD_WORKBOOK,
-    official_workbook: str | Path = DEFAULT_OFFICIAL_WORKBOOK,
-    annual_energy_upstream: str | Path = ANNUAL_ENERGY_UPSTREAM,
-    sample_mapping_path: str | Path = SAMPLE_INDUSTRY_MAPPING_CSV,
-    official_mapping_path: str | Path = OFFICIAL_2025_MAPPING_CSV,
-    industry_weight_evolution_path: str | Path = INDUSTRY_WEIGHT_EVOLUTION_CSV,
-    require_parquet: bool = False,
-    materialize_bootstrap_daily: bool = False,
-    block_length: int = 7,
-    mode: str = "custom",
-    run_label: str | None = None,
-) -> dict[str, Any]:
-    """运行完整新口径链路；Bootstrap按情景/年分块，避免全量日乘数常驻内存。"""
-
-    _assert_current_method_contract()
-    output_path = Path(output_dir).resolve()
-    if output_path.exists() and (not output_path.is_dir() or any(output_path.iterdir())):
-        raise FileExistsError(f"输出目录必须为空或不存在，拒绝覆盖：{output_path}")
-    if str(method).strip() != ANNUAL_ENERGY_METHOD:
-        raise ValueError(
-            f"3.5.0正式与冒烟链路只允许年度电量方法{ANNUAL_ENERGY_METHOD}"
-        )
-    year_values = tuple(sorted({int(value) for value in years}))
-    scenario_values = tuple(str(value) for value in planning_scenarios)
-    if not year_values or any(year < 2025 for year in year_values):
-        raise ValueError("规划年份不能为空且不得早于2025")
-    if not scenario_values or set(scenario_values).difference(SCENARIO_ORDER):
-        raise ValueError(f"规划情景必须取自{SCENARIO_ORDER}")
-    if len(scenario_values) != len(set(scenario_values)):
-        raise ValueError("规划情景不得重复")
-    if int(bootstrap_scenarios) <= 0 or int(block_length) <= 0:
-        raise ValueError("Bootstrap场景数和块长必须为正整数")
-
-    (
-        input_manifest,
-        sample_catalog,
-        official_mapping,
-        sample_mapping,
-        sample_energy,
-        official_balance_summary,
-        official_department_balance,
-        excluded_energy_ledger,
-    ) = _load_input_ledger(
-        load_workbook=load_workbook,
-        official_workbook=official_workbook,
-        sample_mapping_path=sample_mapping_path,
-        official_mapping_path=official_mapping_path,
-        annual_energy_upstream=annual_energy_upstream,
-        industry_weight_evolution_path=industry_weight_evolution_path,
-    )
-    (
-        system_history,
-        user_quality,
-        industry_daily,
-        industry_aggregate_diagnostics,
-        cell_quality,
-        baseline_shapes,
-        baseline_diagnostics,
-        shape_history,
-        traditional_industries,
-        day_type_factors,
-        future_parameters,
-        envelope_history,
-        envelope_factors,
-        residual_library,
-        residual_diagnostics,
-    ) = _build_history_shapes(
-        load_workbook=load_workbook,
-        sample_mapping=sample_mapping,
-        year_values=year_values,
-    )
-
-    (
-        annual_energy,
-        scope_bridge,
-        evolution,
-        official_2025,
-        component_energy,
-        component_energy_closure,
-        proxy_sector_weights,
-        target_month_energy,
-    ) = _decompose_annual_energy(
-        annual_energy_upstream=annual_energy_upstream,
-        industry_weight_evolution_path=industry_weight_evolution_path,
-        year_values=year_values,
-        scenario_values=scenario_values,
-        method=method,
-        sample_energy=sample_energy,
-        excluded_energy_ledger=excluded_energy_ledger,
-        envelope_factors=envelope_factors,
-    )
-
-    (
-        baseline_2023,
-        province_typical_2023,
-        base_year_industry_components,
-        correction,
-        future_industry_components,
-        future_total_component_shapes,
-        proxy_sector_typical_shapes,
-    ) = _build_baseline_and_correction(
-        baseline_shapes=baseline_shapes,
-        system_history=system_history,
-        excluded_energy_ledger=excluded_energy_ledger,
-        sample_mapping_path=sample_mapping_path,
-        official_mapping_path=official_mapping_path,
-        official_workbook=official_workbook,
-        future_parameters=future_parameters,
-        component_energy=component_energy,
-    )
-
+    block_length: int,
+    materialize_bootstrap_daily: bool,
+) -> dict[str, list[pd.DataFrame]]:
+    """情景×年主循环：装配→指标→Bootstrap→代表轨迹→归一（§3.3 步骤8—13）。"""
     assembly_closure_frames: list[pd.DataFrame] = []
     deterministic_daily_frames: list[pd.DataFrame] = []
     deterministic_monthly_frames: list[pd.DataFrame] = []
@@ -1329,7 +1228,7 @@ def run_pipeline(
                 day_type_factors,
                 future_parameters,
                 envelope_factors,
-                correction.component,
+                correction_component,
                 method=method,
                 horizon=FORMAL_HORIZON,
                 peak_valley_phi=FORMAL_PEAK_VALLEY_PHI,
@@ -1470,21 +1369,177 @@ def run_pipeline(
             normalized_monthly["unit"] = "p.u."
             normalized_monthly_peak_frames.append(normalized_monthly)
             del multipliers, monthly_features, annual_features, annual_all, monthly_all
+    return {
+        "assembly_closure": assembly_closure_frames,
+        "deterministic_daily": deterministic_daily_frames,
+        "deterministic_monthly": deterministic_monthly_frames,
+        "deterministic_annual": deterministic_annual_frames,
+        "typical_workday": typical_workday_frames,
+        "season_daytype_typical": season_daytype_typical_frames,
+        "bootstrap_daily": bootstrap_daily_frames,
+        "bootstrap_check": bootstrap_check_frames,
+        "bootstrap_ranking": bootstrap_ranking_frames,
+        "bootstrap_annual": bootstrap_annual_frames,
+        "bootstrap_monthly": bootstrap_monthly_frames,
+        "representative_annual": representative_annual_frames,
+        "representative_monthly": representative_monthly_frames,
+        "annual_curve_absolute": annual_curve_absolute_frames,
+        "annual_curve_normalized": annual_curve_normalized_frames,
+        "all_trajectory_daily": all_trajectory_daily_frames,
+        "adaptive_typical": adaptive_typical_frames,
+        "typical_load_factor": typical_load_factor_frames,
+        "normalized_monthly_peak": normalized_monthly_peak_frames,
+    }
 
-    deterministic_daily = _concat(deterministic_daily_frames)
-    deterministic_monthly = _concat(deterministic_monthly_frames)
-    deterministic_annual = _concat(deterministic_annual_frames)
-    bootstrap_annual_metrics = _concat(bootstrap_annual_frames)
-    bootstrap_monthly_metrics = _concat(bootstrap_monthly_frames)
-    representative_annual_metrics = _concat(representative_annual_frames)
-    representative_monthly_metrics = _concat(representative_monthly_frames)
-    annual_curves_absolute = _concat(annual_curve_absolute_frames)
-    annual_curves = _concat(annual_curve_normalized_frames)
-    all_trajectory_daily = _concat(all_trajectory_daily_frames)
-    adaptive_typical_days = _concat(adaptive_typical_frames)
-    typical_day_load_factors = _concat(typical_load_factor_frames)
-    normalized_monthly_peak_curves = _concat(normalized_monthly_peak_frames)
-    assembly_closure = _concat(assembly_closure_frames)
+
+def run_pipeline(
+    *,
+    years: Iterable[int],
+    output_dir: str | Path,
+    bootstrap_scenarios: int,
+    planning_scenarios: Sequence[str] = SCENARIO_ORDER,
+    method: str = ANNUAL_ENERGY_METHOD,
+    load_workbook: str | Path = DEFAULT_LOAD_WORKBOOK,
+    official_workbook: str | Path = DEFAULT_OFFICIAL_WORKBOOK,
+    annual_energy_upstream: str | Path = ANNUAL_ENERGY_UPSTREAM,
+    sample_mapping_path: str | Path = SAMPLE_INDUSTRY_MAPPING_CSV,
+    official_mapping_path: str | Path = OFFICIAL_2025_MAPPING_CSV,
+    industry_weight_evolution_path: str | Path = INDUSTRY_WEIGHT_EVOLUTION_CSV,
+    require_parquet: bool = False,
+    materialize_bootstrap_daily: bool = False,
+    block_length: int = 7,
+    mode: str = "custom",
+    run_label: str | None = None,
+) -> dict[str, Any]:
+    """运行完整新口径链路；Bootstrap按情景/年分块，避免全量日乘数常驻内存。"""
+
+    _assert_current_method_contract()
+    output_path = Path(output_dir).resolve()
+    if output_path.exists() and (not output_path.is_dir() or any(output_path.iterdir())):
+        raise FileExistsError(f"输出目录必须为空或不存在，拒绝覆盖：{output_path}")
+    if str(method).strip() != ANNUAL_ENERGY_METHOD:
+        raise ValueError(
+            f"3.5.0正式与冒烟链路只允许年度电量方法{ANNUAL_ENERGY_METHOD}"
+        )
+    year_values = tuple(sorted({int(value) for value in years}))
+    scenario_values = tuple(str(value) for value in planning_scenarios)
+    if not year_values or any(year < 2025 for year in year_values):
+        raise ValueError("规划年份不能为空且不得早于2025")
+    if not scenario_values or set(scenario_values).difference(SCENARIO_ORDER):
+        raise ValueError(f"规划情景必须取自{SCENARIO_ORDER}")
+    if len(scenario_values) != len(set(scenario_values)):
+        raise ValueError("规划情景不得重复")
+    if int(bootstrap_scenarios) <= 0 or int(block_length) <= 0:
+        raise ValueError("Bootstrap场景数和块长必须为正整数")
+
+    (
+        input_manifest,
+        sample_catalog,
+        official_mapping,
+        sample_mapping,
+        sample_energy,
+        official_balance_summary,
+        official_department_balance,
+        excluded_energy_ledger,
+    ) = _load_input_ledger(
+        load_workbook=load_workbook,
+        official_workbook=official_workbook,
+        sample_mapping_path=sample_mapping_path,
+        official_mapping_path=official_mapping_path,
+        annual_energy_upstream=annual_energy_upstream,
+        industry_weight_evolution_path=industry_weight_evolution_path,
+    )
+    (
+        system_history,
+        user_quality,
+        industry_daily,
+        industry_aggregate_diagnostics,
+        cell_quality,
+        baseline_shapes,
+        baseline_diagnostics,
+        shape_history,
+        traditional_industries,
+        day_type_factors,
+        future_parameters,
+        envelope_history,
+        envelope_factors,
+        residual_library,
+        residual_diagnostics,
+    ) = _build_history_shapes(
+        load_workbook=load_workbook,
+        sample_mapping=sample_mapping,
+        year_values=year_values,
+    )
+
+    (
+        annual_energy,
+        scope_bridge,
+        evolution,
+        official_2025,
+        component_energy,
+        component_energy_closure,
+        proxy_sector_weights,
+        target_month_energy,
+    ) = _decompose_annual_energy(
+        annual_energy_upstream=annual_energy_upstream,
+        industry_weight_evolution_path=industry_weight_evolution_path,
+        year_values=year_values,
+        scenario_values=scenario_values,
+        method=method,
+        sample_energy=sample_energy,
+        excluded_energy_ledger=excluded_energy_ledger,
+        envelope_factors=envelope_factors,
+    )
+
+    (
+        baseline_2023,
+        province_typical_2023,
+        base_year_industry_components,
+        correction,
+        future_industry_components,
+        future_total_component_shapes,
+        proxy_sector_typical_shapes,
+    ) = _build_baseline_and_correction(
+        baseline_shapes=baseline_shapes,
+        system_history=system_history,
+        excluded_energy_ledger=excluded_energy_ledger,
+        sample_mapping_path=sample_mapping_path,
+        official_mapping_path=official_mapping_path,
+        official_workbook=official_workbook,
+        future_parameters=future_parameters,
+        component_energy=component_energy,
+    )
+
+    frames = _run_scenario_year_loop(
+        scenario_values=scenario_values,
+        year_values=year_values,
+        method=method,
+        component_energy=component_energy,
+        baseline_2023=baseline_2023,
+        day_type_factors=day_type_factors,
+        future_parameters=future_parameters,
+        envelope_factors=envelope_factors,
+        correction_component=correction.component,
+        residual_library=residual_library,
+        bootstrap_scenarios=bootstrap_scenarios,
+        block_length=block_length,
+        materialize_bootstrap_daily=materialize_bootstrap_daily,
+    )
+
+    deterministic_daily = _concat(frames["deterministic_daily"])
+    deterministic_monthly = _concat(frames["deterministic_monthly"])
+    deterministic_annual = _concat(frames["deterministic_annual"])
+    bootstrap_annual_metrics = _concat(frames["bootstrap_annual"])
+    bootstrap_monthly_metrics = _concat(frames["bootstrap_monthly"])
+    representative_annual_metrics = _concat(frames["representative_annual"])
+    representative_monthly_metrics = _concat(frames["representative_monthly"])
+    annual_curves_absolute = _concat(frames["annual_curve_absolute"])
+    annual_curves = _concat(frames["annual_curve_normalized"])
+    all_trajectory_daily = _concat(frames["all_trajectory_daily"])
+    adaptive_typical_days = _concat(frames["adaptive_typical"])
+    typical_day_load_factors = _concat(frames["typical_load_factor"])
+    normalized_monthly_peak_curves = _concat(frames["normalized_monthly_peak"])
+    assembly_closure = _concat(frames["assembly_closure"])
     _assert_natural_energy_targets(
         annual_energy,
         deterministic_annual,
@@ -1714,15 +1769,15 @@ def run_pipeline(
         "deterministic_annual_metrics": deterministic_annual,
         "trajectory_monthly_metrics": trajectory_monthly_metrics,
         "trajectory_annual_metrics": trajectory_annual_metrics,
-        "province_season_daytype_typical": _concat(season_daytype_typical_frames),
-        "typical_workdays": _concat(typical_workday_frames),
+        "province_season_daytype_typical": _concat(frames["season_daytype_typical"]),
+        "typical_workdays": _concat(frames["typical_workday"]),
         "adaptive_typical_day_curves": adaptive_typical_days,
         "typical_day_load_factors": typical_day_load_factors,
         "bootstrap_monthly_checks": _add_scope_metadata(
-            _concat(bootstrap_check_frames)
+            _concat(frames["bootstrap_check"])
         ),
         "bootstrap_scenario_ranking": _add_scope_metadata(
-            _concat(bootstrap_ranking_frames)
+            _concat(frames["bootstrap_ranking"])
         ),
         "bootstrap_scenario_annual_metrics": bootstrap_annual_metrics,
         "bootstrap_scenario_monthly_metrics": bootstrap_monthly_metrics,
@@ -1739,7 +1794,7 @@ def run_pipeline(
         "display_m1_p50_annual_scale_2025_2045": display_m1_p50_annual_scale,
     }
     tables["bootstrap_daily_multipliers"] = _add_scope_metadata(
-        _concat(bootstrap_daily_frames)
+        _concat(frames["bootstrap_daily"])
     )
     _assert_no_legacy_outputs(tables)
     _assert_method_consistency(tables, method)
