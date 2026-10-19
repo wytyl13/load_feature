@@ -918,6 +918,101 @@ def _official_balance_tables(balance: object) -> tuple[pd.DataFrame, pd.DataFram
     return summary, departments
 
 
+def _load_input_ledger(
+    *,
+    load_workbook: str | Path,
+    official_workbook: str | Path,
+    sample_mapping_path: str | Path,
+    official_mapping_path: str | Path,
+    annual_energy_upstream: str | Path,
+    industry_weight_evolution_path: str | Path,
+):
+    """读取并校验六项输入，产出输入台账、官方平衡表与行业映射（§3.3 输入侧）。"""
+    gate = load_and_validate_inputs(
+        load_workbook=load_workbook,
+        official_workbook=official_workbook,
+        sample_mapping_path=sample_mapping_path,
+        official_mapping_path=official_mapping_path,
+    )
+    additional_manifest = build_input_manifest(
+        {
+            "annual_energy_upstream": annual_energy_upstream,
+            "industry_weight_evolution": industry_weight_evolution_path,
+        }
+    )
+    input_manifest = pd.DataFrame(
+        [item.as_dict() for item in (*gate["manifest"], *additional_manifest)]
+    )
+    sample_mapping = gate["sample_mapping"]
+    sample_energy = gate["sample_industry_energy"]
+    official_balance = gate["official_balance"]
+    excluded_energy_ledger = gate["excluded_energy_ledger"].copy()
+    official_balance_summary, official_department_balance = _official_balance_tables(
+        official_balance
+    )
+    sample_catalog = pd.DataFrame([asdict(item) for item in gate["sample_catalog"]])
+    official_mapping = gate["official_mapping"]
+    return (
+        input_manifest,
+        sample_catalog,
+        official_mapping,
+        sample_mapping,
+        sample_energy,
+        official_balance_summary,
+        official_department_balance,
+        excluded_energy_ledger,
+    )
+
+
+def _build_history_shapes(
+    *,
+    load_workbook: str | Path,
+    sample_mapping: pd.DataFrame,
+    year_values: tuple[int, ...],
+):
+    """历史→行业日聚合→典型日→形状参数→月包络与残差库（§3.3 步骤1—4、7）。"""
+    system_history = read_system_history(load_workbook)
+    user_records, user_quality = read_user_daily(load_workbook, include_new_load=False)
+    industry_daily, industry_aggregate_diagnostics = aggregate_industry_daily(
+        user_records
+    )
+    cell_quality = build_cell_quality(industry_daily)
+    baseline_shapes, baseline_diagnostics = build_baseline_shapes(
+        industry_daily, cell_quality
+    )
+    shape_history = identify_shape_parameters(baseline_shapes, cell_quality)
+    traditional_industries = tuple(
+        sample_mapping.loc[sample_mapping.is_traditional.astype(bool), "industry"].astype(str)
+    )
+    if set(industry_daily.industry.astype(str).unique()) != set(traditional_industries):
+        raise AssertionError("行业日聚合结果必须覆盖且只覆盖24个传统细分行业")
+    day_type_factors = estimate_province_day_type_factors(system_history, source_year=2023)
+    future_parameters = build_future_parameter_table(
+        baseline_shapes, shape_history, year_values
+    )
+    envelope_history, envelope_factors = build_monthly_envelope(system_history)
+    residual_library, residual_diagnostics = build_interday_residual_library(
+        system_history
+    )
+    return (
+        system_history,
+        user_quality,
+        industry_daily,
+        industry_aggregate_diagnostics,
+        cell_quality,
+        baseline_shapes,
+        baseline_diagnostics,
+        shape_history,
+        traditional_industries,
+        day_type_factors,
+        future_parameters,
+        envelope_history,
+        envelope_factors,
+        residual_library,
+        residual_diagnostics,
+    )
+
+
 def run_pipeline(
     *,
     years: Iterable[int],
@@ -958,52 +1053,43 @@ def run_pipeline(
     if int(bootstrap_scenarios) <= 0 or int(block_length) <= 0:
         raise ValueError("Bootstrap场景数和块长必须为正整数")
 
-    gate = load_and_validate_inputs(
+    (
+        input_manifest,
+        sample_catalog,
+        official_mapping,
+        sample_mapping,
+        sample_energy,
+        official_balance_summary,
+        official_department_balance,
+        excluded_energy_ledger,
+    ) = _load_input_ledger(
         load_workbook=load_workbook,
         official_workbook=official_workbook,
         sample_mapping_path=sample_mapping_path,
         official_mapping_path=official_mapping_path,
+        annual_energy_upstream=annual_energy_upstream,
+        industry_weight_evolution_path=industry_weight_evolution_path,
     )
-    additional_manifest = build_input_manifest(
-        {
-            "annual_energy_upstream": annual_energy_upstream,
-            "industry_weight_evolution": industry_weight_evolution_path,
-        }
-    )
-    input_manifest = pd.DataFrame(
-        [item.as_dict() for item in (*gate["manifest"], *additional_manifest)]
-    )
-    sample_mapping = gate["sample_mapping"]
-    sample_energy = gate["sample_industry_energy"]
-    official_balance = gate["official_balance"]
-    excluded_energy_ledger = gate["excluded_energy_ledger"].copy()
-    official_balance_summary, official_department_balance = _official_balance_tables(
-        official_balance
-    )
-
-    system_history = read_system_history(load_workbook)
-    user_records, user_quality = read_user_daily(load_workbook, include_new_load=False)
-    industry_daily, industry_aggregate_diagnostics = aggregate_industry_daily(
-        user_records
-    )
-    cell_quality = build_cell_quality(industry_daily)
-    baseline_shapes, baseline_diagnostics = build_baseline_shapes(
-        industry_daily, cell_quality
-    )
-    shape_history = identify_shape_parameters(baseline_shapes, cell_quality)
-    traditional_industries = tuple(
-        sample_mapping.loc[sample_mapping.is_traditional.astype(bool), "industry"].astype(str)
-    )
-    if set(industry_daily.industry.astype(str).unique()) != set(traditional_industries):
-        raise AssertionError("行业日聚合结果必须覆盖且只覆盖24个传统细分行业")
-    day_type_factors = estimate_province_day_type_factors(system_history, source_year=2023)
-    future_parameters = build_future_parameter_table(
-        baseline_shapes, shape_history, year_values
-    )
-
-    envelope_history, envelope_factors = build_monthly_envelope(system_history)
-    residual_library, residual_diagnostics = build_interday_residual_library(
-        system_history
+    (
+        system_history,
+        user_quality,
+        industry_daily,
+        industry_aggregate_diagnostics,
+        cell_quality,
+        baseline_shapes,
+        baseline_diagnostics,
+        shape_history,
+        traditional_industries,
+        day_type_factors,
+        future_parameters,
+        envelope_history,
+        envelope_factors,
+        residual_library,
+        residual_diagnostics,
+    ) = _build_history_shapes(
+        load_workbook=load_workbook,
+        sample_mapping=sample_mapping,
+        year_values=year_values,
     )
 
     annual_energy = load_upstream_annual_energy(
@@ -1495,8 +1581,8 @@ def run_pipeline(
 
     tables: dict[str, pd.DataFrame] = {
         "input_manifest": input_manifest,
-        "sample_catalog": pd.DataFrame([asdict(item) for item in gate["sample_catalog"]]),
-        "official_mapping": gate["official_mapping"],
+        "sample_catalog": sample_catalog,
+        "official_mapping": official_mapping,
         "official_balance_summary": official_balance_summary,
         "official_department_balance": official_department_balance,
         "excluded_energy_ledger": excluded_energy_ledger,
