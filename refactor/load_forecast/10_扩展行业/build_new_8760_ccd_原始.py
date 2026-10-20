@@ -44,11 +44,22 @@
    ACTUAL_FILES(旧10类实测清单含互联网——居民生活无全省实测8760)
 
 用法: python build_new_8760.py 2023
+
+结构(S10 重构,行为不变): main() 编排——_anchor_industry_energy 电量锚定(占比/锚点/κ) →
+_train_and_build_series 周曲线训练融合与目标年生成 → _write_industry_csvs 行业CSV →
+_resolve_total_and_residual 总负荷口径(2020/21实测扣除, 其余合成) → _write_metrics_xlsx 指标表 →
+_write_backtest_compare 回测对比 → _plot_typical_day_figures 典型日图。argv 与算法函数冻结未动。
 """
 import sys
 import os
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
+plt.rcParams['axes.unicode_minus'] = False
+from openpyxl import load_workbook
 
 YEAR = int(sys.argv[1]) if len(sys.argv) > 1 else 2023
 SENSITIVITY = len(sys.argv) > 2 and sys.argv[2] == '--sens'   # 敏感性算例: 重点行业2025-2030增速极端化
@@ -141,6 +152,18 @@ HOLIDAYS = {
 }
 assert YEAR in HOLIDAYS, f'缺少 {YEAR} 节假日表'
 TRAIN_YEAR = 2022
+
+ind_map = {  # CSV文件名 -> 山东表行业名
+    '居民生活_MW.csv': 'B、城乡居民生活用电合计',   # 2026-09-05: 互联网退出, 居民生活进入(山东表B行)
+    '充换电服务业_MW.csv': '充换电服务业',
+    '化学原料和化学制品制造业_MW.csv': '化学原料和化学制品制造业',
+    '有色金属冶炼和压延加工业_MW.csv': '有色金属冶炼和压延加工业',
+    '汽车制造业_MW.csv': '汽车制造业',
+    '电气机械和器材制造业_MW.csv': '电气机械和器材制造业',
+    '非金属矿物制品业_MW.csv': '非金属矿物制品业',
+    '黑色金属冶炼和压延加工业_MW.csv': '黑色金属冶炼和压延加工业',
+    '数据中心_MW.csv': '互联网数据服务',   # 2026-08-27 v26: 山东表"其中：互联网数据服务"行(112行)
+}
 
 def readc(f):
     try:
@@ -392,169 +415,168 @@ def build_year_perunit(year, week_curves, week_levels):
     return out, ts
 
 # ---------- 3. 目标年份电量(与0812一致: 20-25用山东表实际占比, 2030用NN锚点) ----------
-xl = pd.read_excel(str(CLASSIFICATION_XLSX),
-                   header=None, skiprows=14)
-xl = xl.dropna(subset=[0])
-name_list = xl[0].astype(str).str.strip().tolist()
+def _anchor_industry_energy() -> tuple:
+    """按山东分类表锚定各行业年电量(万kWh), 含 2030 占比外推/ML锚点、敏感性算例与 κ 口径统一。
 
-def find_share(name):
-    for k, v in share_rows.items():
-        if name in k:
-            return v
-    raise KeyError(f'未找到行业: {name}')
+    Returns:
+        tuple: (energy {CSV文件名: 年电量万kWh}, total_measured 实测总负荷电量万kWh——
+            仅 2020/2021/2023(κ口径) 有值, 其余年 None)。
+    """
+    xl = pd.read_excel(str(CLASSIFICATION_XLSX),
+                       header=None, skiprows=14)
+    xl = xl.dropna(subset=[0])
+    name_list = xl[0].astype(str).str.strip().tolist()
 
-if YEAR > 2023:
-    # 仅2030: 占比按2020-2023四年逐年变化平均外推(线性最小二乘, 用户2026-08-19拍板;
-    # 逐年比例外推会使低基数高增长行业(充换电)指数爆炸, 已弃用; 总量仍用ML锚点)
-    hist_years = np.array([2020, 2021, 2022, 2023])
-    share_mat = xl.iloc[:, 8:14].to_numpy(float)   # (行=行业, 列=2020..2025占比)
-    e_mat = xl.iloc[:, 1:7].to_numpy(float)        # (行=行业, 列=2020..2025电量)
-    cols = hist_years - 2020
-    share_hist = {name: share_mat[j, cols] for j, name in enumerate(name_list)}
-    def extrap(name):
-        v = share_hist[name]
-        if np.all(v == v[0]):   # 全0或全相等: 返回常数
-            return v[0]
-        k, b = np.polyfit(hist_years, v, 1)
-        return max(0.0, k * YEAR + b)
-    share_rows = {n: extrap(n) for n in name_list}
-    _sy = os.environ.get('P8760_SHARE_YEAR', '')
-    if _sy:
-        _c = 8 + (int(_sy) - 2020)
-        share_rows = dict(zip(name_list, xl.iloc[:, _c].to_numpy(float)))
-        print(f'  >>> [占比改用 {_sy} 年实际值] 全部行业')
-    _si = os.environ.get('P8760_SHARE23_INDS', '')      # 只把指定行业换成 2023 实际占比
-    if _si:
-        _c = 8 + 3
-        _col23 = xl.iloc[:, _c].to_numpy(float)
-        for _j, _n in enumerate(name_list):
-            if any(k in _n for k in _si.split(',')):
-                share_rows[_n] = float(_col23[_j])
-                print(f'  >>> [占比换2023] {_n}  {float(_col23[_j]):.4%}')
-    if YEAR == 2030:
-        # 2030总量锚点(2026-09-04 拍板回退8特征单一口径): 8特征MLP(ARIMA特征外推)预测2030全社会用电量10,159.7亿kWh;
-        # 无8特征对照列时回退ML预测电量(亿kWh)列, 再回退NN预测 11023.6亿kWh
-        arima_f = os.path.join(str(FORECAST_ROOT), 'ARIMA预测2026-2030.xlsx')
-        if os.path.isfile(arima_f):
-            a = pd.read_excel(arima_f, sheet_name='ARIMA特征与ML电量')
-            col = 'ML预测电量(亿kWh,8特征对照)' if 'ML预测电量(亿kWh,8特征对照)' in a.columns else 'ML预测电量(亿kWh)'
-            tag = '8特征'
-            TOTAL = float(a[a['年份'] == 2030][col].iloc[0]) * 10000   # 万kWh
-            print(f'2030总量锚点: ML {tag}预测 {TOTAL/10000:,.1f} 亿kWh')
+    def find_share(name):
+        for k, v in share_rows.items():
+            if name in k:
+                return v
+        raise KeyError(f'未找到行业: {name}')
+
+    if YEAR > 2023:
+        # 仅2030: 占比按2020-2023四年逐年变化平均外推(线性最小二乘, 用户2026-08-19拍板;
+        # 逐年比例外推会使低基数高增长行业(充换电)指数爆炸, 已弃用; 总量仍用ML锚点)
+        hist_years = np.array([2020, 2021, 2022, 2023])
+        share_mat = xl.iloc[:, 8:14].to_numpy(float)   # (行=行业, 列=2020..2025占比)
+        e_mat = xl.iloc[:, 1:7].to_numpy(float)        # (行=行业, 列=2020..2025电量)
+        cols = hist_years - 2020
+        share_hist = {name: share_mat[j, cols] for j, name in enumerate(name_list)}
+        def extrap(name):
+            v = share_hist[name]
+            if np.all(v == v[0]):   # 全0或全相等: 返回常数
+                return v[0]
+            k, b = np.polyfit(hist_years, v, 1)
+            return max(0.0, k * YEAR + b)
+        share_rows = {n: extrap(n) for n in name_list}
+        _sy = os.environ.get('P8760_SHARE_YEAR', '')
+        if _sy:
+            _c = 8 + (int(_sy) - 2020)
+            share_rows = dict(zip(name_list, xl.iloc[:, _c].to_numpy(float)))
+            print(f'  >>> [占比改用 {_sy} 年实际值] 全部行业')
+        _si = os.environ.get('P8760_SHARE23_INDS', '')      # 只把指定行业换成 2023 实际占比
+        if _si:
+            _c = 8 + 3
+            _col23 = xl.iloc[:, _c].to_numpy(float)
+            for _j, _n in enumerate(name_list):
+                if any(k in _n for k in _si.split(',')):
+                    share_rows[_n] = float(_col23[_j])
+                    print(f'  >>> [占比换2023] {_n}  {float(_col23[_j]):.4%}')
+        if YEAR == 2030:
+            # 2030总量锚点(2026-09-04 拍板回退8特征单一口径): 8特征MLP(ARIMA特征外推)预测2030全社会用电量10,159.7亿kWh;
+            # 无8特征对照列时回退ML预测电量(亿kWh)列, 再回退NN预测 11023.6亿kWh
+            arima_f = os.path.join(str(FORECAST_ROOT), 'ARIMA预测2026-2030.xlsx')
+            if os.path.isfile(arima_f):
+                a = pd.read_excel(arima_f, sheet_name='ARIMA特征与ML电量')
+                col = 'ML预测电量(亿kWh,8特征对照)' if 'ML预测电量(亿kWh,8特征对照)' in a.columns else 'ML预测电量(亿kWh)'
+                tag = '8特征'
+                TOTAL = float(a[a['年份'] == 2030][col].iloc[0]) * 10000   # 万kWh
+                print(f'2030总量锚点: ML {tag}预测 {TOTAL/10000:,.1f} 亿kWh')
+            else:
+                nn = pd.read_excel(os.path.join(str(FORECAST_ROOT), 'NN预测2026-2030.xlsx'), sheet_name='2026-2030预测')
+                TOTAL = float(nn[nn['年份'] == 2030]['预测电量(亿kWh)'].iloc[0]) * 10000   # 万kWh
         else:
-            nn = pd.read_excel(os.path.join(str(FORECAST_ROOT), 'NN预测2026-2030.xlsx'), sheet_name='2026-2030预测')
-            TOTAL = float(nn[nn['年份'] == 2030]['预测电量(亿kWh)'].iloc[0]) * 10000   # 万kWh
+            tot_hist = e_mat[name_list.index('全社会用电总计'), cols]
+            TOTAL = tot_hist[0]
+        ALL_IND = TOTAL   # 预测年直接锚定全社会用电量(10类之和=ML预测全社会; 2026-09-05起居民生活为独立重点行业, 扣除=全社会−10类)
+        print(f'{YEAR}占比沿用{TRAIN_YEAR}: 全社会{TOTAL/10000:,.1f}亿kWh, 全行业占比{share_rows["A、全行业用电合计"]:.4f}(预测年已改为全社会口径)')
     else:
-        tot_hist = e_mat[name_list.index('全社会用电总计'), cols]
-        TOTAL = tot_hist[0]
-    ALL_IND = TOTAL   # 预测年直接锚定全社会用电量(10类之和=ML预测全社会; 2026-09-05起居民生活为独立重点行业, 扣除=全社会−10类)
-    print(f'{YEAR}占比沿用{TRAIN_YEAR}: 全社会{TOTAL/10000:,.1f}亿kWh, 全行业占比{share_rows["A、全行业用电合计"]:.4f}(预测年已改为全社会口径)')
-else:
-    COL_E = 1 + (YEAR - 2020)   # 电量列(0列=行业名, 1-6=2020..2025)
-    COL_S = 8 + (YEAR - 2020)   # 占比列(8-13=2020..2025)
-    share_rows = dict(zip(name_list, xl[COL_S].to_numpy(float)))
-    energy_rows = dict(zip(name_list, xl[COL_E].to_numpy(float)))
-    TOTAL = energy_rows['全社会用电总计']        # 万kWh
-    ALL_IND = energy_rows['A、全行业用电合计']    # 万kWh
+        COL_E = 1 + (YEAR - 2020)   # 电量列(0列=行业名, 1-6=2020..2025)
+        COL_S = 8 + (YEAR - 2020)   # 占比列(8-13=2020..2025)
+        share_rows = dict(zip(name_list, xl[COL_S].to_numpy(float)))
+        energy_rows = dict(zip(name_list, xl[COL_E].to_numpy(float)))
+        TOTAL = energy_rows['全社会用电总计']        # 万kWh
+        ALL_IND = energy_rows['A、全行业用电合计']    # 万kWh
 
-ind_map = {  # CSV文件名 -> 山东表行业名
-    '居民生活_MW.csv': 'B、城乡居民生活用电合计',   # 2026-09-05: 互联网退出, 居民生活进入(山东表B行)
-    '充换电服务业_MW.csv': '充换电服务业',
-    '化学原料和化学制品制造业_MW.csv': '化学原料和化学制品制造业',
-    '有色金属冶炼和压延加工业_MW.csv': '有色金属冶炼和压延加工业',
-    '汽车制造业_MW.csv': '汽车制造业',
-    '电气机械和器材制造业_MW.csv': '电气机械和器材制造业',
-    '非金属矿物制品业_MW.csv': '非金属矿物制品业',
-    '黑色金属冶炼和压延加工业_MW.csv': '黑色金属冶炼和压延加工业',
-    '数据中心_MW.csv': '互联网数据服务',   # 2026-08-27 v26: 山东表"其中：互联网数据服务"行(112行)
-}
-energy = {}   # 行业 -> 年电量(万kWh)
-for fn, name in ind_map.items():
-    energy[fn] = find_share(name) * TOTAL
-if YEAR == 2030:
-    # 数据中心2030固定规则(2026-08-27): 山东表2025"互联网数据服务"174,212.4万 × 2023-2025实际CAGR 1.054^5
-    # 不走占比外推(2023口径跳变+583%会使外推爆炸到~175亿); 阿里8760只提供曲线形状
-    energy['数据中心_MW.csv'] = 174212.4337 * 1.054 ** 5
-# 2026-09-05: 互联网退出重点行业(毛/净口径与"互联网=毛−数据中心"收口一并删除);
-# 数据中心保留独立行业, 固定规则电量锚不变
-energy['总负荷去掉九个行业负荷.csv'] = ALL_IND - sum(energy.values())
-
-def load_util_hours():
-    """各行业2030最大负荷利用小时(h) — 读正常预测2030的 全年指标 xlsx(与最终结果表④块同源), 缺失时用回退表"""
-    p = os.path.join(OUTROOT, '2030_每月负荷特性指标.xlsx')
-    try:
-        y = pd.read_excel(p, sheet_name='全年指标')
-        d_all = dict(zip(y['行业'], y['最大负荷利用小时(h)']))   # 全表(含'数据中心', 过滤前取)
-        y = y[y['行业'].isin(list(ind_map.values()))]
-        d = dict(zip(y['行业'], y['最大负荷利用小时(h)']))
-        if '数据中心' in d_all:   # v26: 指标表行业名=数据中心, 敏感性参数名=山东表'互联网数据服务'
-            d['互联网数据服务'] = d_all['数据中心']
-        if '居民生活' in d_all:   # 2026-09-05: 指标表行业名=居民生活, 敏感性参数名=山东表'B、城乡居民生活用电合计'
-            d['B、城乡居民生活用电合计'] = d_all['居民生活']
-        return d
-    except Exception as e:
-        print(f'  [warn] 读 {os.path.basename(p)} 失败({e}), 用回退利用小时表')
-        return {'居民生活': 4500, 'B、城乡居民生活用电合计': 4500, '充换电服务业': 1373, '化学原料和化学制品制造业': 6717,
-                '有色金属冶炼和压延加工业': 6875, '汽车制造业': 6408, '电气机械和器材制造业': 4710,
-                '非金属矿物制品业': 3925, '黑色金属冶炼和压延加工业': 2319,
-                '互联网数据服务': 8760}   # 数据中心: 24h连续运行, 回退表=8760(≥6000 → high板块)
-
-if SENSITIVITY:
-    # 敏感性算例(甲方2026-08-20要求分两板块): 板块内行业2025-2030增速极端化 — 增速>0的×2, 增速<0的设为全系统增速×2;
-    # 板块划分依据=2030最大负荷利用小时(④分行业电量表): high=≥6000h, low=<6000h; 板块外行业增速保持原值不变。
-    # 全系统总量(ML 8特征预测 10,159.7亿)不变, 扣除分行业吸收差额 => 纯看板块行业权重变化对负荷特性的影响
-    e2025 = e_mat[:, 5]                     # 山东表2025年电量列
-    i_tot = name_list.index('全社会用电总计')
-    r_sys = (TOTAL / e2025[i_tot]) ** 0.2 - 1
-    tmax = load_util_hours()                # 行业 -> 2030最大负荷利用小时(h)
-    if SENS_MODE == 'ind':
-        in_group = {fn: (ind_map[fn] == SENS_IND) for fn in ind_map}   # 单行业极端化(相关性分析用)
-    else:
-        in_group = {}
-        for fn, name in ind_map.items():
-            h = tmax.get(name, 6000 if SENS_MODE == 'high' else 0)
-            in_group[fn] = (h >= 6000) if SENS_MODE == 'high' else (h < 6000)
-    print(f'===== 敏感性算例[{SENS_MODE}{"-" + SENS_IND if SENS_IND else ""}]: 全系统2025-2030增速 r_sys={r_sys:.4f} =====')
-    print('  板块内行业(增速极端化): ' + '、'.join(f'{ind_map[fn]}({tmax.get(ind_map[fn], 0):.0f}h)'
-                                                 for fn in ind_map if in_group[fn]))
-    print('  板块外行业(原增速不变): ' + '、'.join(ind_map[fn] for fn in ind_map if not in_group[fn]))
+    energy = {}   # 行业 -> 年电量(万kWh)
     for fn, name in ind_map.items():
-        row_i = next(i for i, k in enumerate(name_list) if name in k)   # 模糊匹配表内行名
-        e25 = e2025[row_i]
-        r_orig = (energy[fn] / e25) ** 0.2 - 1
-        # 2026-09-05: 互联网毛/净口径删除, 原"互联网r_orig用毛口径"特例一并删除
-        if in_group[fn]:
-            r_new = r_orig * 2 if r_orig > 0 else 2 * r_sys
-            tag = '板块内(极端化)'
-        else:
-            r_new = r_orig
-            tag = '板块外(不变)'
-        energy[fn] = e25 * (1 + r_new) ** 5
-        print(f'  {name}: r_orig={r_orig:.4f} -> r_new={r_new:.4f} [{tag}], 2030电量={energy[fn]:,.0f} 万kWh')
-    energy['总负荷去掉九个行业负荷.csv'] = TOTAL - sum(energy[fn] for fn in ind_map)
-    print(f'  扣除分行业(吸收差额): {energy["总负荷去掉九个行业负荷.csv"]:,.0f} 万kWh')
-print(f'===== {YEAR}年 各行业电量(万kWh) =====')
-for fn in INDUSTRY_FILES:
-    print(f'  {fn}: {energy[fn]:,.0f}  (占比 {energy[fn]/ALL_IND:.4%})')
+        energy[fn] = find_share(name) * TOTAL
+    if YEAR == 2030:
+        # 数据中心2030固定规则(2026-08-27): 山东表2025"互联网数据服务"174,212.4万 × 2023-2025实际CAGR 1.054^5
+        # 不走占比外推(2023口径跳变+583%会使外推爆炸到~175亿); 阿里8760只提供曲线形状
+        energy['数据中心_MW.csv'] = 174212.4337 * 1.054 ** 5
+    # 2026-09-05: 互联网退出重点行业(毛/净口径与"互联网=毛−数据中心"收口一并删除);
+    # 数据中心保留独立行业, 固定规则电量锚不变
+    energy['总负荷去掉九个行业负荷.csv'] = ALL_IND - sum(energy.values())
 
-if YEAR in (2020, 2021, 2023):
-    # 2026-08-19 口径统一(κ修正): 行业电量锚定用山东表"全口径"(占全社会~41%),
-    # 而总负荷用"实测统调口径"(占全社会~75%)——口径错配使9行业/实测总负荷虚高到55%,
-    # 凌晨瞬时占比顶破100%(2020年29h超限)。修正: 9行业电量 ×κ=实测总负荷电量/全社会电量,
-    # 与实测总负荷同口径后 9行业/实测 = 41%, 凌晨瞬时 ≤75%, 数学上永不超限, 缩放逻辑删除。
-    # 2023回测同样涉及山东表↔实测跨表换算, 必须κ(用户2026-08-19拍板: 所有跨表换算都K)。
-    act0 = readc(os.path.join(str(TOTAL_LOAD_ROOT), '历史负荷数据%d.csv' % YEAR))
-    a0 = pd.DatetimeIndex(pd.to_datetime(act0['时间'])); v0 = act0['值'].to_numpy(float)
-    if YEAR == 2020:   # 闰年删2月29日 -> 8760(与生成表结构一致)
-        keep = ~((a0.month == 2) & (a0.day == 29))
-        a0, v0 = a0[keep], v0[keep]
-    kappa = v0.sum() * 0.1 / TOTAL   # 实测总负荷电量(万kWh) / 山东表全社会(万kWh)
-    print(f'[口径统一] {YEAR} 统调系数 κ = 实测总负荷({v0.sum()*0.1:,.0f}万kWh) / 全社会({TOTAL:,.0f}万kWh) = {kappa:.4f}')
-    for fn in ind_map:
-        energy[fn] *= kappa          # 9行业电量×κ, 与实测总负荷同口径(数据中心2020=14,629×κ≈1.10亿)
-    energy['总负荷去掉九个行业负荷.csv'] = v0.sum() * 0.1 - sum(energy[fn] for fn in ind_map)
-    print(f'  κ修正后9行业合计 {sum(energy[fn] for fn in ind_map):,.0f} 万kWh, '
-          f'扣除分行业(=实测−9行业) {energy["总负荷去掉九个行业负荷.csv"]:,.0f} 万kWh')
+    def load_util_hours():
+        """各行业2030最大负荷利用小时(h) — 读正常预测2030的 全年指标 xlsx(与最终结果表④块同源), 缺失时用回退表"""
+        p = os.path.join(OUTROOT, '2030_每月负荷特性指标.xlsx')
+        try:
+            y = pd.read_excel(p, sheet_name='全年指标')
+            d_all = dict(zip(y['行业'], y['最大负荷利用小时(h)']))   # 全表(含'数据中心', 过滤前取)
+            y = y[y['行业'].isin(list(ind_map.values()))]
+            d = dict(zip(y['行业'], y['最大负荷利用小时(h)']))
+            if '数据中心' in d_all:   # v26: 指标表行业名=数据中心, 敏感性参数名=山东表'互联网数据服务'
+                d['互联网数据服务'] = d_all['数据中心']
+            if '居民生活' in d_all:   # 2026-09-05: 指标表行业名=居民生活, 敏感性参数名=山东表'B、城乡居民生活用电合计'
+                d['B、城乡居民生活用电合计'] = d_all['居民生活']
+            return d
+        except Exception as e:
+            print(f'  [warn] 读 {os.path.basename(p)} 失败({e}), 用回退利用小时表')
+            return {'居民生活': 4500, 'B、城乡居民生活用电合计': 4500, '充换电服务业': 1373, '化学原料和化学制品制造业': 6717,
+                    '有色金属冶炼和压延加工业': 6875, '汽车制造业': 6408, '电气机械和器材制造业': 4710,
+                    '非金属矿物制品业': 3925, '黑色金属冶炼和压延加工业': 2319,
+                    '互联网数据服务': 8760}   # 数据中心: 24h连续运行, 回退表=8760(≥6000 → high板块)
+
+    if SENSITIVITY:
+        # 敏感性算例(甲方2026-08-20要求分两板块): 板块内行业2025-2030增速极端化 — 增速>0的×2, 增速<0的设为全系统增速×2;
+        # 板块划分依据=2030最大负荷利用小时(④分行业电量表): high=≥6000h, low=<6000h; 板块外行业增速保持原值不变。
+        # 全系统总量(ML 8特征预测 10,159.7亿)不变, 扣除分行业吸收差额 => 纯看板块行业权重变化对负荷特性的影响
+        e2025 = e_mat[:, 5]                     # 山东表2025年电量列
+        i_tot = name_list.index('全社会用电总计')
+        r_sys = (TOTAL / e2025[i_tot]) ** 0.2 - 1
+        tmax = load_util_hours()                # 行业 -> 2030最大负荷利用小时(h)
+        if SENS_MODE == 'ind':
+            in_group = {fn: (ind_map[fn] == SENS_IND) for fn in ind_map}   # 单行业极端化(相关性分析用)
+        else:
+            in_group = {}
+            for fn, name in ind_map.items():
+                h = tmax.get(name, 6000 if SENS_MODE == 'high' else 0)
+                in_group[fn] = (h >= 6000) if SENS_MODE == 'high' else (h < 6000)
+        print(f'===== 敏感性算例[{SENS_MODE}{"-" + SENS_IND if SENS_IND else ""}]: 全系统2025-2030增速 r_sys={r_sys:.4f} =====')
+        print('  板块内行业(增速极端化): ' + '、'.join(f'{ind_map[fn]}({tmax.get(ind_map[fn], 0):.0f}h)'
+                                                     for fn in ind_map if in_group[fn]))
+        print('  板块外行业(原增速不变): ' + '、'.join(ind_map[fn] for fn in ind_map if not in_group[fn]))
+        for fn, name in ind_map.items():
+            row_i = next(i for i, k in enumerate(name_list) if name in k)   # 模糊匹配表内行名
+            e25 = e2025[row_i]
+            r_orig = (energy[fn] / e25) ** 0.2 - 1
+            # 2026-09-05: 互联网毛/净口径删除, 原"互联网r_orig用毛口径"特例一并删除
+            if in_group[fn]:
+                r_new = r_orig * 2 if r_orig > 0 else 2 * r_sys
+                tag = '板块内(极端化)'
+            else:
+                r_new = r_orig
+                tag = '板块外(不变)'
+            energy[fn] = e25 * (1 + r_new) ** 5
+            print(f'  {name}: r_orig={r_orig:.4f} -> r_new={r_new:.4f} [{tag}], 2030电量={energy[fn]:,.0f} 万kWh')
+        energy['总负荷去掉九个行业负荷.csv'] = TOTAL - sum(energy[fn] for fn in ind_map)
+        print(f'  扣除分行业(吸收差额): {energy["总负荷去掉九个行业负荷.csv"]:,.0f} 万kWh')
+    print(f'===== {YEAR}年 各行业电量(万kWh) =====')
+    for fn in INDUSTRY_FILES:
+        print(f'  {fn}: {energy[fn]:,.0f}  (占比 {energy[fn]/ALL_IND:.4%})')
+
+    total_measured = None
+    if YEAR in (2020, 2021, 2023):
+        # 2026-08-19 口径统一(κ修正): 行业电量锚定用山东表"全口径"(占全社会~41%),
+        # 而总负荷用"实测统调口径"(占全社会~75%)——口径错配使9行业/实测总负荷虚高到55%,
+        # 凌晨瞬时占比顶破100%(2020年29h超限)。修正: 9行业电量 ×κ=实测总负荷电量/全社会电量,
+        # 与实测总负荷同口径后 9行业/实测 = 41%, 凌晨瞬时 ≤75%, 数学上永不超限, 缩放逻辑删除。
+        # 2023回测同样涉及山东表↔实测跨表换算, 必须κ(用户2026-08-19拍板: 所有跨表换算都K)。
+        act0 = readc(os.path.join(str(TOTAL_LOAD_ROOT), '历史负荷数据%d.csv' % YEAR))
+        a0 = pd.DatetimeIndex(pd.to_datetime(act0['时间'])); v0 = act0['值'].to_numpy(float)
+        if YEAR == 2020:   # 闰年删2月29日 -> 8760(与生成表结构一致)
+            keep = ~((a0.month == 2) & (a0.day == 29))
+            a0, v0 = a0[keep], v0[keep]
+        kappa = v0.sum() * 0.1 / TOTAL   # 实测总负荷电量(万kWh) / 山东表全社会(万kWh)
+        print(f'[口径统一] {YEAR} 统调系数 κ = 实测总负荷({v0.sum()*0.1:,.0f}万kWh) / 全社会({TOTAL:,.0f}万kWh) = {kappa:.4f}')
+        for fn in ind_map:
+            energy[fn] *= kappa          # 9行业电量×κ, 与实测总负荷同口径(数据中心2020=14,629×κ≈1.10亿)
+        energy['总负荷去掉九个行业负荷.csv'] = v0.sum() * 0.1 - sum(energy[fn] for fn in ind_map)
+        print(f'  κ修正后9行业合计 {sum(energy[fn] for fn in ind_map):,.0f} 万kWh, '
+              f'扣除分行业(=实测−9行业) {energy["总负荷去掉九个行业负荷.csv"]:,.0f} 万kWh')
+        total_measured = v0.sum() * 0.1
+    return energy, total_measured
 
 def load_generated_year(fn, year):
     """读生成年(2020/2021)行业CSV(有名值MW), 重建周曲线+周水平(与 train_month_curves 同构):
@@ -586,101 +608,123 @@ def load_generated_year(fn, year):
     return week_curves, week_levels
 
 # ---------- 4. 各行业: 训练曲线 -> 目标年8760标幺 -> 有名值 ----------
-TRAIN_MODE = ('融合2022+2023' if YEAR in (2020, 2021)
-              else ('融合2020-2023(22/23实测+20/21构造)' if YEAR == 2030 else '仅2022'))
-print(f'===== 训练模式: {TRAIN_MODE} 各行业 周曲线(月典型曲线×周内比例拼接, 2026-08-24按周融合) =====')
-series = {}   # 行业 -> (时间, 值)
-for fn in INDUSTRY_FILES:
-    warn = []
-    if YEAR in (2020, 2021):
-        t22 = train_year_industry(fn, 2022, warn)
-        t23 = train_year_industry(fn, 2023, warn)
-        week_curves, week_levels = fuse_trainings([t22, t23])
-    elif YEAR == 2030:
-        # 2026-08-19 用户要求: 预测2030必须用2020-2023四年数据; 22/23用实测训练周曲线,
-        # 20/21为构造产物(形状源于22/23融合), 从生成CSV重建周曲线参与同周等权融合
-        t22 = train_year_industry(fn, 2022, warn)
-        t23 = train_year_industry(fn, 2023, warn)
-        c20, l20 = load_generated_year(fn, 2020)
-        c21, l21 = load_generated_year(fn, 2021)
-        if os.environ.get('CCD_ONLY23', '') == '1' and fn == '充换电服务业_MW.csv':
-            week_curves, week_levels = fuse_trainings([t23])
-            print(f'  >>> [CCD only23] {fn}: 只用 2023 训练周曲线')
+def _train_and_build_series(energy: dict) -> tuple:
+    """按训练模式逐行业训练/融合周曲线, 生成目标年 8760 有名值序列。
+
+    Args:
+        energy (dict): _anchor_industry_energy 输出的行业年电量。
+
+    Returns:
+        tuple: (series {fn: (时间索引, 8760值MW)}, ts 目标年时间索引)。
+    """
+    TRAIN_MODE = ('融合2022+2023' if YEAR in (2020, 2021)
+                  else ('融合2020-2023(22/23实测+20/21构造)' if YEAR == 2030 else '仅2022'))
+    print(f'===== 训练模式: {TRAIN_MODE} 各行业 周曲线(月典型曲线×周内比例拼接, 2026-08-24按周融合) =====')
+    series = {}   # 行业 -> (时间, 值)
+    for fn in INDUSTRY_FILES:
+        warn = []
+        if YEAR in (2020, 2021):
+            t22 = train_year_industry(fn, 2022, warn)
+            t23 = train_year_industry(fn, 2023, warn)
+            week_curves, week_levels = fuse_trainings([t22, t23])
+        elif YEAR == 2030:
+            # 2026-08-19 用户要求: 预测2030必须用2020-2023四年数据; 22/23用实测训练周曲线,
+            # 20/21为构造产物(形状源于22/23融合), 从生成CSV重建周曲线参与同周等权融合
+            t22 = train_year_industry(fn, 2022, warn)
+            t23 = train_year_industry(fn, 2023, warn)
+            c20, l20 = load_generated_year(fn, 2020)
+            c21, l21 = load_generated_year(fn, 2021)
+            if os.environ.get('CCD_ONLY23', '') == '1' and fn == '充换电服务业_MW.csv':
+                week_curves, week_levels = fuse_trainings([t23])
+                print(f'  >>> [CCD only23] {fn}: 只用 2023 训练周曲线')
+            else:
+                w23f, l23f = fuse_trainings([t22, t23])
+                week_curves, week_levels = fuse_trainings([(w23f, l23f), (c20, l20), (c21, l21)])
         else:
-            w23f, l23f = fuse_trainings([t22, t23])
-            week_curves, week_levels = fuse_trainings([(w23f, l23f), (c20, l20), (c21, l21)])
-    else:
-        week_curves, week_levels = train_year_industry(fn, 2022, warn)
-    if fn == INDUSTRY_FILES[0]:
-        print(f'  周曲线: {len(week_curves)} 周, 周相对水平 {min(week_levels.values()):.3f}~{max(week_levels.values()):.3f}')
-    if warn:
-        print(f'  [{fn}] 数据缺失处理:'); [print(w) for w in warn]
-    perunit, ts = build_year_perunit(YEAR, week_curves, week_levels)
-    p_base = energy[fn] * 10.0 / perunit.sum()      # MW
-    vals = perunit * p_base
-    series[fn] = (ts, vals)
-    print(f'  {fn}: P_base={p_base:,.1f} MW, 年最大={vals.max():,.1f} MW, 年电量={vals.sum()*0.1:,.0f} 万kWh(目标{energy[fn]:,.0f})')
+            week_curves, week_levels = train_year_industry(fn, 2022, warn)
+        if fn == INDUSTRY_FILES[0]:
+            print(f'  周曲线: {len(week_curves)} 周, 周相对水平 {min(week_levels.values()):.3f}~{max(week_levels.values()):.3f}')
+        if warn:
+            print(f'  [{fn}] 数据缺失处理:'); [print(w) for w in warn]
+        perunit, ts = build_year_perunit(YEAR, week_curves, week_levels)
+        p_base = energy[fn] * 10.0 / perunit.sum()      # MW
+        vals = perunit * p_base
+        series[fn] = (ts, vals)
+        print(f'  {fn}: P_base={p_base:,.1f} MW, 年最大={vals.max():,.1f} MW, 年电量={vals.sum()*0.1:,.0f} 万kWh(目标{energy[fn]:,.0f})')
+    return series, ts
 
 # ---------- 5. 输出 {YEAR}/ 文件夹CSV(与2022格式一致) ----------
-for fn in INDUSTRY_FILES:
-    ts_i, vals = series[fn]
-    df = pd.DataFrame({'时间': ts_i.strftime('%Y-%m-%d %H:%M:%S'), '值': np.round(vals, 4)})
-    df.to_csv(os.path.join(OUT, fn), index=False, encoding='utf-8-sig')
-print(f'已输出 {len(INDUSTRY_FILES)} 个行业CSV到 {OUT}')
+def _write_industry_csvs(series: dict) -> None:
+    """写 {YEAR}/ 各行业 8760 CSV。"""
+    for fn in INDUSTRY_FILES:
+        ts_i, vals = series[fn]
+        df = pd.DataFrame({'时间': ts_i.strftime('%Y-%m-%d %H:%M:%S'), '值': np.round(vals, 4)})
+        df.to_csv(os.path.join(OUT, fn), index=False, encoding='utf-8-sig')
+    print(f'已输出 {len(INDUSTRY_FILES)} 个行业CSV到 {OUT}')
 
 # ---------- 5.5 2020/2021: 不预测总负荷, 用实测; 扣除分行业 = 实测 − 9重点行业(生成) ----------
-if YEAR in (2020, 2021):
-    act = readc(os.path.join(str(TOTAL_LOAD_ROOT), '历史负荷数据%d.csv' % YEAR))
-    act_ts = pd.DatetimeIndex(pd.to_datetime(act['时间']))
-    act_vals = act['值'].to_numpy(float)
-    if YEAR == 2020:   # 闰年删2月29日 -> 8760
-        keep = ~((act_ts.month == 2) & (act_ts.day == 29))
-        act_ts, act_vals = act_ts[keep], act_vals[keep]
-    # 删除旧的预测总负荷产物与旧8行业版扣除(防残留误读)
-    for old in ['总负荷_合成.csv', '总负荷去掉八个行业负荷.csv']:
-        op = os.path.join(OUT, old)
-        if os.path.isfile(op):
-            os.remove(op); print(f'已删除: {op}')
-    # 扣除分行业 = 实测总负荷(8760) − 9重点行业生成值(8760), 逐小时相减
-    # (2026-08-19 口径统一κ修正后 9行业/实测=41% 凌晨瞬时≤75%, 数学上不超限, 无需缩放/截断)
-    inds9 = [fn for fn in INDUSTRY_FILES if fn != '总负荷去掉九个行业负荷.csv']
-    ind_sum = sum(series[fn][1] for fn in inds9)
-    rest = act_vals - ind_sum
-    nclip = int((rest < 0).sum())
-    if nclip:
-        print(f'  [提示] 扣除分行业负值 {nclip} 小时截断到 0 (占全年 {nclip/len(rest):.2%}, '
-              f'截断电量 {rest[rest < 0].sum()*0.1:,.0f} 万kWh = 全年 {abs(rest[rest<0].sum()/act_vals.sum()):.3%})')
-    rest = np.clip(rest, 0, None)
-    series['总负荷去掉九个行业负荷.csv'] = (act_ts, rest)
-    df_rest = pd.DataFrame({'时间': act_ts.strftime('%Y-%m-%d %H:%M:%S'), '值': np.round(rest, 4)})
-    df_rest.to_csv(os.path.join(OUT, '总负荷去掉九个行业负荷.csv'), index=False, encoding='utf-8-sig')
-    total = act_vals   # 总负荷 = 实测(不再 10 类之和合成)
-    print(f'{YEAR} 实测总负荷: 年最大={total.max():,.1f} MW, 年电量={total.sum()*0.1:,.0f} 万kWh')
-    print(f'{YEAR} 扣除分行业 = 实测 - 9重点行业(κ口径统一后 9行业/实测={sum(energy[fn] for fn in ind_map)/(v0.sum()*0.1):.1%}): 年最大={rest.max():,.1f} MW, '
-          f'年电量={rest.sum()*0.1:,.0f} 万kWh (9行业之和={act_vals.sum()*0.1 - rest.sum()*0.1:,.0f})')
-else:
-    # ---------- 6. 总负荷 = 10类之和(9行业+扣除) ----------
-    total = sum(vals for _, vals in series.values())
-    df_total = pd.DataFrame({'时间': ts.strftime('%Y-%m-%d %H:%M:%S'), '值': np.round(total, 4)})
-    df_total.to_csv(os.path.join(OUT, '总负荷_合成.csv'), index=False, encoding='utf-8-sig')
-    print(f'{YEAR}合成总负荷: 年最大={total.max():,.1f} MW, 年电量={total.sum()*0.1:,.0f} 万kWh, 最大负荷利用小时={total.sum()/total.max():.0f} h')
+def _resolve_total_and_residual(series: dict, ts, energy: dict, total_measured) -> tuple:
+    """总负荷口径分派: 2020/21 用实测并重算扣除; 其余年 合成=10类之和。
 
-# 若该年有实测数据, 加载用于对比
-actual = None
-actual_ts = None
-if YEAR > TRAIN_YEAR and os.path.isdir(os.path.join(DATA_ROOT, str(YEAR))):
-    act_curves = load_year_curves(YEAR)
-    # 2026-09-05 修复: 实测合计按 ACTUAL_FILES(旧10类, 含实测扣除csv)逐类相加=实测总;
-    # 不能用 INDUSTRY_FILES(居民生活无全省实测8760, 会 KeyError)
-    actual = sum(act_curves[fn] for fn in ACTUAL_FILES)
-    actual_ts = pd.DatetimeIndex(pd.to_datetime(readc(os.path.join(DATA_ROOT, str(YEAR), ACTUAL_FILES[0]))['时间']))
-    print(f'已加载 {YEAR} 实测数据用于对比')
+    Args:
+        series (dict): _train_and_build_series 输出。
+        ts: 目标年时间索引。
+        energy (dict): 行业年电量(2020/21 κ口径打印用)。
+        total_measured (float | None): 实测总负荷电量万kWh(2020/21/2023 有值)。
+
+    Returns:
+        tuple: (total 8760 ndarray, actual 实测合计或 None, actual_ts 实测时间索引或 None)。
+    """
+    if YEAR in (2020, 2021):
+        act = readc(os.path.join(str(TOTAL_LOAD_ROOT), '历史负荷数据%d.csv' % YEAR))
+        act_ts = pd.DatetimeIndex(pd.to_datetime(act['时间']))
+        act_vals = act['值'].to_numpy(float)
+        if YEAR == 2020:   # 闰年删2月29日 -> 8760
+            keep = ~((act_ts.month == 2) & (act_ts.day == 29))
+            act_ts, act_vals = act_ts[keep], act_vals[keep]
+        # 删除旧的预测总负荷产物与旧8行业版扣除(防残留误读)
+        for old in ['总负荷_合成.csv', '总负荷去掉八个行业负荷.csv']:
+            op = os.path.join(OUT, old)
+            if os.path.isfile(op):
+                os.remove(op); print(f'已删除: {op}')
+        # 扣除分行业 = 实测总负荷(8760) − 9重点行业生成值(8760), 逐小时相减
+        # (2026-08-19 口径统一κ修正后 9行业/实测=41% 凌晨瞬时≤75%, 数学上不超限, 无需缩放/截断)
+        inds9 = [fn for fn in INDUSTRY_FILES if fn != '总负荷去掉九个行业负荷.csv']
+        ind_sum = sum(series[fn][1] for fn in inds9)
+        rest = act_vals - ind_sum
+        nclip = int((rest < 0).sum())
+        if nclip:
+            print(f'  [提示] 扣除分行业负值 {nclip} 小时截断到 0 (占全年 {nclip/len(rest):.2%}, '
+                  f'截断电量 {rest[rest < 0].sum()*0.1:,.0f} 万kWh = 全年 {abs(rest[rest<0].sum()/act_vals.sum()):.3%})')
+        rest = np.clip(rest, 0, None)
+        series['总负荷去掉九个行业负荷.csv'] = (act_ts, rest)
+        df_rest = pd.DataFrame({'时间': act_ts.strftime('%Y-%m-%d %H:%M:%S'), '值': np.round(rest, 4)})
+        df_rest.to_csv(os.path.join(OUT, '总负荷去掉九个行业负荷.csv'), index=False, encoding='utf-8-sig')
+        total = act_vals   # 总负荷 = 实测(不再 10 类之和合成)
+        print(f'{YEAR} 实测总负荷: 年最大={total.max():,.1f} MW, 年电量={total.sum()*0.1:,.0f} 万kWh')
+        print(f'{YEAR} 扣除分行业 = 实测 - 9重点行业(κ口径统一后 9行业/实测={sum(energy[fn] for fn in ind_map)/(total_measured):.1%}): 年最大={rest.max():,.1f} MW, '
+              f'年电量={rest.sum()*0.1:,.0f} 万kWh (9行业之和={act_vals.sum()*0.1 - rest.sum()*0.1:,.0f})')
+    else:
+        # ---------- 6. 总负荷 = 10类之和(9行业+扣除) ----------
+        total = sum(vals for _, vals in series.values())
+        df_total = pd.DataFrame({'时间': ts.strftime('%Y-%m-%d %H:%M:%S'), '值': np.round(total, 4)})
+        df_total.to_csv(os.path.join(OUT, '总负荷_合成.csv'), index=False, encoding='utf-8-sig')
+        print(f'{YEAR}合成总负荷: 年最大={total.max():,.1f} MW, 年电量={total.sum()*0.1:,.0f} 万kWh, 最大负荷利用小时={total.sum()/total.max():.0f} h')
+
+    # 若该年有实测数据, 加载用于对比
+    actual = None
+    actual_ts = None
+    if YEAR > TRAIN_YEAR and os.path.isdir(os.path.join(DATA_ROOT, str(YEAR))):
+        act_curves = load_year_curves(YEAR)
+        # 2026-09-05 修复: 实测合计按 ACTUAL_FILES(旧10类, 含实测扣除csv)逐类相加=实测总;
+        # 不能用 INDUSTRY_FILES(居民生活无全省实测8760, 会 KeyError)
+        actual = sum(act_curves[fn] for fn in ACTUAL_FILES)
+        actual_ts = pd.DatetimeIndex(pd.to_datetime(readc(os.path.join(DATA_ROOT, str(YEAR), ACTUAL_FILES[0]))['时间']))
+        print(f'已加载 {YEAR} 实测数据用于对比')
+    return total, actual, actual_ts
 
 # ---------- 7. 每月/全年负荷特性指标 ----------
-idx = pd.DatetimeIndex(ts)
-m = idx.month
-
-def monthly_metrics(vals):
+def monthly_metrics(vals, m):
     out = {}
     for mo in range(1, 13):
         v = vals[m == mo]
@@ -688,9 +732,9 @@ def monthly_metrics(vals):
                        峰谷差=v.max() - v.min())
     return out
 
-def metrics_table(vals, label):
+def metrics_table(vals, label, m):
     """返回 (每月表12行, 全年表1行)"""
-    mm = monthly_metrics(vals)
+    mm = monthly_metrics(vals, m)
     ymax = vals.max()
     rows = []
     for mo in range(1, 13):
@@ -720,46 +764,64 @@ def metrics_table(vals, label):
     }
     return pd.DataFrame(rows), pd.DataFrame([year_row])
 
-month_tables, year_tables = [], []
-for label, vals in [('总负荷', total)] + [(fn.replace('_MW.csv', ''), series[fn][1]) for fn in INDUSTRY_FILES]:
-    mt, yt = metrics_table(vals, label)
-    month_tables.append(mt)
-    year_tables.append(yt)
-mt = pd.concat(month_tables, ignore_index=True)
-yt = pd.concat(year_tables, ignore_index=True)
+def _write_metrics_xlsx(total, series: dict, ts) -> tuple:
+    """计算总负荷+各行业每月/全年指标并写 {YEAR}_每月负荷特性指标.xlsx(含指标说明)。
 
-XLSX = os.path.join(OUTROOT, f'{YEAR}{SENS_SUFFIX}_每月负荷特性指标.xlsx')
-with pd.ExcelWriter(XLSX, engine='openpyxl') as w:
-    mt.to_excel(w, sheet_name='每月指标', index=False)
-    yt.to_excel(w, sheet_name='全年指标', index=False)
+    Args:
+        total: 总负荷 8760 ndarray。
+        series (dict): 行业序列(含扣除)。
+        ts: 目标年时间索引。
 
-from openpyxl import load_workbook
-wb = load_workbook(XLSX)
-ws1 = wb['每月指标']; ws2 = wb['全年指标']
-notes1 = [
-    '指标说明(每月):',
-    '  最大负荷率 = 月最大负荷 ÷ 年最大负荷',
-    '  最小负荷率 = 月最小负荷 ÷ 年最大负荷',
-    '  负荷率     = 月平均负荷 ÷ 月最大负荷',
-    '  峰谷差率   = (月最大负荷 − 月最小负荷) ÷ 月最大负荷',
-]
-notes2 = [
-    '指标说明(全年):',
-    '  最大负荷利用小时数 = 年电量(万kWh)×10 ÷ 年最大负荷(MW)',
-    '  月不平衡负荷率     = (Σ各月最大负荷 ÷ 12) ÷ 年最大负荷',
-    '  季不平衡负荷率     = (Σ各季最大负荷 ÷ 4) ÷ 年最大负荷',
-    '  年负荷率           = 年电量(万kWh)×10 ÷ (年最大负荷(MW) × 8760)',
-]
-for ws, notes in [(ws1, notes1), (ws2, notes2)]:
-    start = ws.max_row + 2
-    for j, t in enumerate(notes):
-        ws.cell(row=start + j, column=1, value=t)
-wb.save(XLSX)
-print(f'指标表已输出: {XLSX}')
+    Returns:
+        tuple: (mt 每月指标表, yt 全年指标表), 供回测对比复用。
+    """
+    idx = pd.DatetimeIndex(ts)
+    m = idx.month
+
+    month_tables, year_tables = [], []
+    for label, vals in [('总负荷', total)] + [(fn.replace('_MW.csv', ''), series[fn][1]) for fn in INDUSTRY_FILES]:
+        mt, yt = metrics_table(vals, label, m)
+        month_tables.append(mt)
+        year_tables.append(yt)
+    mt = pd.concat(month_tables, ignore_index=True)
+    yt = pd.concat(year_tables, ignore_index=True)
+
+    XLSX = os.path.join(OUTROOT, f'{YEAR}{SENS_SUFFIX}_每月负荷特性指标.xlsx')
+    with pd.ExcelWriter(XLSX, engine='openpyxl') as w:
+        mt.to_excel(w, sheet_name='每月指标', index=False)
+        yt.to_excel(w, sheet_name='全年指标', index=False)
+
+    wb = load_workbook(XLSX)
+    ws1 = wb['每月指标']; ws2 = wb['全年指标']
+    notes1 = [
+        '指标说明(每月):',
+        '  最大负荷率 = 月最大负荷 ÷ 年最大负荷',
+        '  最小负荷率 = 月最小负荷 ÷ 年最大负荷',
+        '  负荷率     = 月平均负荷 ÷ 月最大负荷',
+        '  峰谷差率   = (月最大负荷 − 月最小负荷) ÷ 月最大负荷',
+    ]
+    notes2 = [
+        '指标说明(全年):',
+        '  最大负荷利用小时数 = 年电量(万kWh)×10 ÷ 年最大负荷(MW)',
+        '  月不平衡负荷率     = (Σ各月最大负荷 ÷ 12) ÷ 年最大负荷',
+        '  季不平衡负荷率     = (Σ各季最大负荷 ÷ 4) ÷ 年最大负荷',
+        '  年负荷率           = 年电量(万kWh)×10 ÷ (年最大负荷(MW) × 8760)',
+    ]
+    for ws, notes in [(ws1, notes1), (ws2, notes2)]:
+        start = ws.max_row + 2
+        for j, t in enumerate(notes):
+            ws.cell(row=start + j, column=1, value=t)
+    wb.save(XLSX)
+    print(f'指标表已输出: {XLSX}')
+    return mt, yt
 
 # ---------- 7.5 预测vs实测对比表(仅预测年且有实测) ----------
-if actual is not None:
-    mt_a, yt_a = metrics_table(actual, f'{YEAR}实测')
+def _write_backtest_compare(mt, yt, actual, actual_ts, ts) -> None:
+    """2023 回测: 合成 vs 实测 全年/每月指标对比 xlsx。"""
+    if actual is None:
+        return
+    m = pd.DatetimeIndex(ts).month
+    mt_a, yt_a = metrics_table(actual, f'{YEAR}实测', m)
     p, a = yt.iloc[0], yt_a.iloc[0]
     cmp_year = pd.DataFrame({
         '指标': ['年最大负荷(MW)', '年电量(万kWh)', '最大负荷利用小时(h)', '月不平衡负荷率', '季不平衡负荷率', '年负荷率'],
@@ -786,80 +848,92 @@ if actual is not None:
     print(cmp_year.round(2).to_string(index=False))
 
 # ---------- 8. 每月典型日曲线图(月平均日曲线, 标幺) ----------
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
-plt.rcParams['axes.unicode_minus'] = False
-
-month_names = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月']
-fig_dir = os.path.join(OUTROOT, f'典型日曲线{YEAR}{SENS_SUFFIX}')
-os.makedirs(fig_dir, exist_ok=True)
-
 def typical_day(vals, mo, m_idx):
     v = vals[m_idx == mo].reshape(-1, 24)
     return v.mean(axis=0)
 
-TAG = '实测' if YEAR in (2020, 2021) else '合成'
-for mo in range(1, 13):
-    td = typical_day(total, mo, m)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(range(24), td / td.max(), 'o-', lw=1.5, ms=4, color='C0', label=f'{YEAR}{TAG}')
-    title = f'{YEAR}年{month_names[mo-1]}典型日负荷曲线(标幺, 基准=月最大)'
-    if actual is not None:
-        td_a = typical_day(actual, mo, actual_ts.month)
-        ax.plot(range(24), td_a / td_a.max(), 's--', lw=1.2, ms=3.5, color='C3', label=f'{YEAR}实测')
-        title += ' — 合成vs实测'
-        ax.legend()
-    ax.set_title(title)
-    ax.set_xlabel('小时'); ax.set_ylabel('标幺值'); ax.set_xticks(range(0, 24, 2))
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout(); fig.savefig(os.path.join(fig_dir, f'{YEAR}年{month_names[mo-1]}典型日曲线.png'), dpi=150); plt.close(fig)
+# ---------- 9. 分行业每月典型日曲线(每行业一张4x3子图网格) ----------
+def _plot_typical_day_figures(total, actual, actual_ts, ts, series: dict) -> None:
+    """画总负荷逐月典型日曲线(含实测对比)与分行业典型日曲线网格图。"""
+    m = pd.DatetimeIndex(ts).month
+    month_names = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月']
+    fig_dir = os.path.join(OUTROOT, f'典型日曲线{YEAR}{SENS_SUFFIX}')
+    os.makedirs(fig_dir, exist_ok=True)
 
-fig, ax = plt.subplots(figsize=(10, 6))
-for mo in range(1, 13):
-    td = typical_day(total, mo, m)
-    ax.plot(range(24), td / total.max(), lw=1.0, color='C0', alpha=0.8)
-if actual is not None:
-    for mo in range(1, 13):
-        td_a = typical_day(actual, mo, actual_ts.month)
-        ax.plot(range(24), td_a / actual.max(), lw=1.0, ls='--', color='C3', alpha=0.7)
-    ax.plot([], [], lw=1.2, color='C0', label='合成(实线)')
-    ax.plot([], [], lw=1.2, ls='--', color='C3', label='实测(虚线)')
-    for i, mo in enumerate(range(1, 13)):
-        ax.plot([], [], color='none')
-        ax.annotate(f'{i+1}月', xy=(22.5, 0.55 - i * 0.045), fontsize=7, color='0.35')
-    ax.legend(loc='upper left', fontsize=9)
-    ax.set_title(f'{YEAR}年逐月典型日负荷曲线(标幺, 基准=年最大) — 合成vs实测')
-else:
+    TAG = '实测' if YEAR in (2020, 2021) else '合成'
     for mo in range(1, 13):
         td = typical_day(total, mo, m)
-        ax.plot(range(24), td / total.max(), lw=1.2, label=month_names[mo-1])
-    ax.set_title(f'{YEAR}年逐月典型日负荷曲线(标幺, 基准=年最大)')
-    ax.legend(ncol=4, fontsize=8)
-ax.set_xlabel('小时'); ax.set_ylabel('标幺值'); ax.set_xticks(range(0, 24, 2))
-ax.grid(True, alpha=0.3)
-fig.tight_layout(); fig.savefig(os.path.join(fig_dir, f'{YEAR}年逐月典型日曲线合并图.png'), dpi=150); plt.close(fig)
-tag = '含实测对比' if actual is not None else '无实测对比'
-print(f'典型日曲线图已输出到 {fig_dir} ({tag})')
-
-# ---------- 9. 分行业每月典型日曲线(每行业一张4x3子图网格) ----------
-ind_fig_dir = os.path.join(OUTROOT, f'分行业典型日曲线{YEAR}{SENS_SUFFIX}')
-os.makedirs(ind_fig_dir, exist_ok=True)
-for fn in INDUSTRY_FILES:
-    vals = series[fn][1]
-    fig, axes = plt.subplots(3, 4, figsize=(15, 9))
-    for i, mo in enumerate(range(1, 13)):
-        ax = axes[i // 4][i % 4]
-        td = typical_day(vals, mo, m)
-        ax.plot(range(24), td / td.max(), 'o-', lw=1.2, ms=3, color='C0')
-        ax.set_title(month_names[mo - 1], fontsize=10)
-        ax.set_xticks(range(0, 24, 6))
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.plot(range(24), td / td.max(), 'o-', lw=1.5, ms=4, color='C0', label=f'{YEAR}{TAG}')
+        title = f'{YEAR}年{month_names[mo-1]}典型日负荷曲线(标幺, 基准=月最大)'
+        if actual is not None:
+            td_a = typical_day(actual, mo, actual_ts.month)
+            ax.plot(range(24), td_a / td_a.max(), 's--', lw=1.2, ms=3.5, color='C3', label=f'{YEAR}实测')
+            title += ' — 合成vs实测'
+            ax.legend()
+        ax.set_title(title)
+        ax.set_xlabel('小时'); ax.set_ylabel('标幺值'); ax.set_xticks(range(0, 24, 2))
         ax.grid(True, alpha=0.3)
-        ax.tick_params(labelsize=8)
-    fig.suptitle(f'{YEAR}年 {fn.replace("_MW.csv", "")} 逐月典型日曲线(标幺, 基准=月最大)', fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(os.path.join(ind_fig_dir, f'{fn.replace("_MW.csv", "")}.png'), dpi=150)
-    plt.close(fig)
-print(f'分行业典型日曲线图已输出到 {ind_fig_dir}')
-print(f'===== {YEAR} 生成完成 =====')
+        fig.tight_layout(); fig.savefig(os.path.join(fig_dir, f'{YEAR}年{month_names[mo-1]}典型日曲线.png'), dpi=150); plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for mo in range(1, 13):
+        td = typical_day(total, mo, m)
+        ax.plot(range(24), td / total.max(), lw=1.0, color='C0', alpha=0.8)
+    if actual is not None:
+        for mo in range(1, 13):
+            td_a = typical_day(actual, mo, actual_ts.month)
+            ax.plot(range(24), td_a / actual.max(), lw=1.0, ls='--', color='C3', alpha=0.7)
+        ax.plot([], [], lw=1.2, color='C0', label='合成(实线)')
+        ax.plot([], [], lw=1.2, ls='--', color='C3', label='实测(虚线)')
+        for i, mo in enumerate(range(1, 13)):
+            ax.plot([], [], color='none')
+            ax.annotate(f'{i+1}月', xy=(22.5, 0.55 - i * 0.045), fontsize=7, color='0.35')
+        ax.legend(loc='upper left', fontsize=9)
+        ax.set_title(f'{YEAR}年逐月典型日负荷曲线(标幺, 基准=年最大) — 合成vs实测')
+    else:
+        for mo in range(1, 13):
+            td = typical_day(total, mo, m)
+            ax.plot(range(24), td / total.max(), lw=1.2, label=month_names[mo-1])
+        ax.set_title(f'{YEAR}年逐月典型日负荷曲线(标幺, 基准=年最大)')
+        ax.legend(ncol=4, fontsize=8)
+    ax.set_xlabel('小时'); ax.set_ylabel('标幺值'); ax.set_xticks(range(0, 24, 2))
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout(); fig.savefig(os.path.join(fig_dir, f'{YEAR}年逐月典型日曲线合并图.png'), dpi=150); plt.close(fig)
+    tag = '含实测对比' if actual is not None else '无实测对比'
+    print(f'典型日曲线图已输出到 {fig_dir} ({tag})')
+
+    ind_fig_dir = os.path.join(OUTROOT, f'分行业典型日曲线{YEAR}{SENS_SUFFIX}')
+    os.makedirs(ind_fig_dir, exist_ok=True)
+    for fn in INDUSTRY_FILES:
+        vals = series[fn][1]
+        fig, axes = plt.subplots(3, 4, figsize=(15, 9))
+        for i, mo in enumerate(range(1, 13)):
+            ax = axes[i // 4][i % 4]
+            td = typical_day(vals, mo, m)
+            ax.plot(range(24), td / td.max(), 'o-', lw=1.2, ms=3, color='C0')
+            ax.set_title(month_names[mo - 1], fontsize=10)
+            ax.set_xticks(range(0, 24, 6))
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(labelsize=8)
+        fig.suptitle(f'{YEAR}年 {fn.replace("_MW.csv", "")} 逐月典型日曲线(标幺, 基准=月最大)', fontsize=13)
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        fig.savefig(os.path.join(ind_fig_dir, f'{fn.replace("_MW.csv", "")}.png'), dpi=150)
+        plt.close(fig)
+    print(f'分行业典型日曲线图已输出到 {ind_fig_dir}')
+
+
+def main() -> None:
+    """目标年 8760 生成主流程:电量锚定→周曲线训练融合→行业CSV→总负荷口径→指标→对比→图。"""
+    energy, total_measured = _anchor_industry_energy()
+    series, ts = _train_and_build_series(energy)
+    _write_industry_csvs(series)
+    total, actual, actual_ts = _resolve_total_and_residual(series, ts, energy, total_measured)
+    mt, yt = _write_metrics_xlsx(total, series, ts)
+    _write_backtest_compare(mt, yt, actual, actual_ts, ts)
+    _plot_typical_day_figures(total, actual, actual_ts, ts, series)
+    print(f'===== {YEAR} 生成完成 =====')
+
+
+if __name__ == '__main__':
+    main()
