@@ -11,6 +11,9 @@
      两年合并拟合拐点作为参考一并列出
 输出: 气温基温判定_2022_2023.csv + 气温基温判定.json(供 build_temperature_elasticity.py 读取)
       + 预测结果_2020-2030/气温情景图/基温拐点判定图.png
+
+结构(S10 重构,行为不变): main() 编排——load_daily_frame 温度+电量日表标幺 →
+filter_work_days 剔除过年/节假日 → find_kinks 网格搜索 → 采用基温两年平均 → 输出 CSV/JSON/图。
 """
 import os
 import sys
@@ -30,7 +33,6 @@ DATA_ROOT = str(HOURLY_ROOT)
 TEMP_CSV = str(TEMPERATURE_CSV)
 OUTROOT = str(FORECAST_ROOT)
 FIGOUT = os.path.join(OUTROOT, '气温情景图')
-os.makedirs(FIGOUT, exist_ok=True)
 
 SERIES = {'总负荷': ['互联网和相关服务_MW.csv', '化学原料和化学制品制造业_MW.csv',
                     '总负荷去掉九个行业负荷.csv', '有色金属冶炼和压延加工业_MW.csv', '汽车制造业_MW.csv',
@@ -65,38 +67,55 @@ def readc(f):
 
 # ---------- 数据: 16市日均温 + 逐日电量 ----------
 # 温度是 16 市等权日均温；负荷先由小时聚合为日，再按同年平均值标幺。
-temp = pd.read_csv(TEMP_CSV, encoding='utf-8-sig')
-temp['date'] = pd.to_datetime(temp['date'])
-temp = temp[temp['date'].dt.year.isin([2022, 2023])].copy()
-daily = temp[['date', 'temp_mean']].copy()
+def load_daily_frame() -> pd.DataFrame:
+    """装配 2022/2023 日表: 16市日均温 + SERIES 各序列日电量及其同年标幺。
 
-for name, files in SERIES.items():
-    tot = np.zeros(len(daily))
-    for fn in files:
-        for year in (2022, 2023):
-            v = readc(os.path.join(DATA_ROOT, str(year), fn))['值'].to_numpy(float)
-            assert len(v) == 8760, f'{year} {fn} 长度 {len(v)}'
-            de = pd.Series(v.reshape(-1, 24).sum(axis=1) * 0.1).to_numpy()   # 万kWh/日
-            tot[daily['date'].dt.year.to_numpy() == year] += de
-    daily[name] = tot
+    Returns:
+        pd.DataFrame: 行=日, 列=date/temp_mean/{序列}/{序列}_pu。
+    """
+    temp = pd.read_csv(TEMP_CSV, encoding='utf-8-sig')
+    temp['date'] = pd.to_datetime(temp['date'])
+    temp = temp[temp['date'].dt.year.isin([2022, 2023])].copy()
+    daily = temp[['date', 'temp_mean']].copy()
 
-# 标幺: ÷同年全年日均电量 (吸收年际增长)
-for name in SERIES:
-    yr = daily['date'].dt.year
-    daily[f'{name}_pu'] = daily[name] / daily.groupby(yr)[name].transform('mean')
+    for name, files in SERIES.items():
+        tot = np.zeros(len(daily))
+        for fn in files:
+            for year in (2022, 2023):
+                v = readc(os.path.join(DATA_ROOT, str(year), fn))['值'].to_numpy(float)
+                assert len(v) == 8760, f'{year} {fn} 长度 {len(v)}'
+                de = pd.Series(v.reshape(-1, 24).sum(axis=1) * 0.1).to_numpy()   # 万kWh/日
+                tot[daily['date'].dt.year.to_numpy() == year] += de
+        daily[name] = tot
 
-# 剔除过年+节假日
-excl = np.zeros(len(daily), bool)
-for year in (2022, 2023):
-    d = daily['date'].dt.strftime('%Y-%m-%d')
-    m = daily['date'].dt.year.to_numpy() == year
-    hol = d.isin(set(HOLIDAYS[year])).to_numpy()
-    s, e = pd.Timestamp(SF_EXT[year][0]), pd.Timestamp(SF_EXT[year][1])
-    sf = ((daily['date'] >= s) & (daily['date'] <= e)).to_numpy()
-    excl |= (hol | sf) & m
-work = daily[~excl].copy()
-print(f'剔除: 法定节假日+过年扩展窗口 共 {int(excl.sum())} 天 (2022 {int(excl[daily.date.dt.year==2022].sum())}/'
-      f'2023 {int(excl[daily.date.dt.year==2023].sum())}), 建模样本 {len(work)} 天')
+    # 标幺: ÷同年全年日均电量 (吸收年际增长)
+    for name in SERIES:
+        yr = daily['date'].dt.year
+        daily[f'{name}_pu'] = daily[name] / daily.groupby(yr)[name].transform('mean')
+    return daily
+
+
+def filter_work_days(daily: pd.DataFrame) -> tuple:
+    """剔除法定节假日+过年扩展窗口, 返回建模样本与剔除掩码。
+
+    Args:
+        daily (pd.DataFrame): load_daily_frame 输出。
+
+    Returns:
+        tuple: (work 建模日表, excl 剔除掩码 ndarray)。
+    """
+    excl = np.zeros(len(daily), bool)
+    for year in (2022, 2023):
+        d = daily['date'].dt.strftime('%Y-%m-%d')
+        m = daily['date'].dt.year.to_numpy() == year
+        hol = d.isin(set(HOLIDAYS[year])).to_numpy()
+        s, e = pd.Timestamp(SF_EXT[year][0]), pd.Timestamp(SF_EXT[year][1])
+        sf = ((daily['date'] >= s) & (daily['date'] <= e)).to_numpy()
+        excl |= (hol | sf) & m
+    work = daily[~excl].copy()
+    print(f'剔除: 法定节假日+过年扩展窗口 共 {int(excl.sum())} 天 (2022 {int(excl[daily.date.dt.year==2022].sum())}/'
+          f'2023 {int(excl[daily.date.dt.year==2023].sum())}), 建模样本 {len(work)} 天')
+    return work, excl
 
 
 # ---------- V形分段线性拟合 ----------
@@ -141,99 +160,129 @@ def find_kinks(s, label):
     return out
 
 
-work['weekend'] = (work['date'].dt.dayofweek >= 5).astype(float)
-work['date'] = pd.to_datetime(work['date'])
-result = {}
-for label in SERIES:
-    print(f'--- {label} 拐点搜索 ---')
-    result[label] = find_kinks(work, label)
-
 # ---------- 采用基温 = 2022与2023拐点的算术平均值 (甲方: 不取中位数, 取平均值) ----------
-adopted = {}
-for label in SERIES:
-    r = result[label]
-    bs = round((r['2022']['base_summer'] + r['2023']['base_summer']) / 2, 2)
-    bw = round((r['2022']['base_winter'] + r['2023']['base_winter']) / 2, 2)
-    adopted[label] = dict(base_summer=bs, base_winter=bw)
-    print(f'>>> {label} 采用基温(两年平均): 夏 {bs}°C | 冬 {bw}°C')
+def adopt_kinks(result: dict) -> dict:
+    """各序列采用基温 = 2022/2023 拐点算术平均。
 
-# ---------- 输出 ----------
-rows = []
-for label in SERIES:
-    for scope, r in result[label].items():
-        rows.append(dict(序列=label, 范围=scope, 夏拐点C=r['base_summer'], 冬拐点C=r['base_winter'],
-                         截距a=r['a'], 夏坡_PercC=r['b_hot_pct'], 冬坡_PercC=r['b_cold_pct'], R2=r['r2'],
-                         n=r['n'], n_hot=r['n_hot'], n_cold=r['n_cold']))
-    rows.append(dict(序列=label, 范围='采用(两年平均)', 夏拐点C=adopted[label]['base_summer'],
-                     冬拐点C=adopted[label]['base_winter'], 夏坡_PercC=np.nan, 冬坡_PercC=np.nan,
-                     R2=np.nan, n=np.nan, n_hot=np.nan, n_cold=np.nan))
-df = pd.DataFrame(rows)
-csv_out = os.path.join(BASE, '气温基温判定_2022_2023.csv')
-df.to_csv(csv_out, index=False, encoding='utf-8-sig')
-print('已输出:', csv_out)
+    Args:
+        result (dict): {序列: find_kinks 输出}。
 
-json_out = os.path.join(BASE, '气温基温判定.json')
-with open(json_out, 'w', encoding='utf-8') as f:
-    json.dump({'adopted': {'base_summer': adopted['总负荷']['base_summer'],
-                           'base_winter': adopted['总负荷']['base_winter'],
-                           'rule': '2022/2023全年温度-日电量V形拐点两年算术平均(build_base_kink.py), 剔除过年+节假日',
-                           'by_scope': result['总负荷'],
-                           'by_scope_kouchu': result['扣除(居民商业等)']},
-               'excluded_days': int(excl.sum())},
-              f, ensure_ascii=False, indent=1)
-print('已输出:', json_out)
+    Returns:
+        dict: {序列: {base_summer, base_winter}}。
+    """
+    adopted = {}
+    for label in SERIES:
+        r = result[label]
+        bs = round((r['2022']['base_summer'] + r['2023']['base_summer']) / 2, 2)
+        bw = round((r['2022']['base_winter'] + r['2023']['base_winter']) / 2, 2)
+        adopted[label] = dict(base_summer=bs, base_winter=bw)
+        print(f'>>> {label} 采用基温(两年平均): 夏 {bs}°C | 冬 {bw}°C')
+    return adopted
+
+
+def write_outputs(result: dict, adopted: dict, excl: np.ndarray) -> None:
+    """写 气温基温判定_2022_2023.csv 与 气温基温判定.json。"""
+    rows = []
+    for label in SERIES:
+        for scope, r in result[label].items():
+            rows.append(dict(序列=label, 范围=scope, 夏拐点C=r['base_summer'], 冬拐点C=r['base_winter'],
+                             截距a=r['a'], 夏坡_PercC=r['b_hot_pct'], 冬坡_PercC=r['b_cold_pct'], R2=r['r2'],
+                             n=r['n'], n_hot=r['n_hot'], n_cold=r['n_cold']))
+        rows.append(dict(序列=label, 范围='采用(两年平均)', 夏拐点C=adopted[label]['base_summer'],
+                         冬拐点C=adopted[label]['base_winter'], 夏坡_PercC=np.nan, 冬坡_PercC=np.nan,
+                         R2=np.nan, n=np.nan, n_hot=np.nan, n_cold=np.nan))
+    df = pd.DataFrame(rows)
+    csv_out = os.path.join(BASE, '气温基温判定_2022_2023.csv')
+    df.to_csv(csv_out, index=False, encoding='utf-8-sig')
+    print('已输出:', csv_out)
+
+    json_out = os.path.join(BASE, '气温基温判定.json')
+    with open(json_out, 'w', encoding='utf-8') as f:
+        json.dump({'adopted': {'base_summer': adopted['总负荷']['base_summer'],
+                               'base_winter': adopted['总负荷']['base_winter'],
+                               'rule': '2022/2023全年温度-日电量V形拐点两年算术平均(build_base_kink.py), 剔除过年+节假日',
+                               'by_scope': result['总负荷'],
+                               'by_scope_kouchu': result['扣除(居民商业等)']},
+                   'excluded_days': int(excl.sum())},
+                  f, ensure_ascii=False, indent=1)
+    print('已输出:', json_out)
+
 
 # ---------- 图: 全年温度-日电量散点 + 分箱均值(平均) + V形拟合 + 拐点线 ----------
-fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-T_all = work['temp_mean'].to_numpy(float)
-Y_all = work['总负荷_pu'].to_numpy(float)
+def plot_kink_figure(work: pd.DataFrame, result: dict, adopted: dict) -> None:
+    """画基温拐点判定图: 合并散点/分箱均值/V形拟合 + 分年拐点对比。"""
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    T_all = work['temp_mean'].to_numpy(float)
+    Y_all = work['总负荷_pu'].to_numpy(float)
 
-# (a) 合并散点 + 1°C分箱均值 + 合并拟合V线 + 采用基温
-ax = axes[0]
-ax.scatter(T_all, Y_all, s=10, alpha=0.30, color='#95a5a6', label='2022/2023逐日(标幺,已剔节假日)')
-bins = np.arange(-10.0, 33.01, 1.0)
-g = work.assign(bin=pd.cut(work['temp_mean'], bins))
-cnt = g.groupby('bin', observed=True)['总负荷_pu'].count()
-bm = g.groupby('bin', observed=True).agg(t=('temp_mean', 'mean'), y=('总负荷_pu', 'mean'))
-bm = bm[cnt.to_numpy() >= 4]
-ax.plot(bm['t'], bm['y'], 'o-', color='#c0392b', lw=1.8, ms=4, label='1°C分箱均值(算术平均)')
-p = result['总负荷']['合并']
-tt = np.linspace(-10, 32, 200)
-bc, bh = p['base_winter'], p['base_summer']
-slope_c = result['总负荷']['合并']['b_cold_pct'] / 100
-slope_h = result['总负荷']['合并']['b_hot_pct'] / 100
-vy = p.get('a', 1.0) + np.maximum(0, tt - bh) * slope_h + np.maximum(0, bc - tt) * slope_c
-ax.plot(tt, vy, '-', color='#2c3e50', lw=1.8, label=f'V形拟合(合并$R^2$={p["r2"]:.3f})')
-ax.axvline(adopted['总负荷']['base_summer'], color='#d35400', ls='--', lw=1.6,
-           label=f"夏基温{adopted['总负荷']['base_summer']}°C(两年平均)")
-ax.axvline(adopted['总负荷']['base_winter'], color='#1f6fb2', ls='--', lw=1.6,
-           label=f"冬基温{adopted['总负荷']['base_winter']}°C(两年平均)")
-ax.set_title('全年温度-日电量对比：电量开始升降的温度点(基温拐点)', fontsize=12)
-ax.set_xlabel('山东16市日均温 (°C)'); ax.set_ylabel('日电量 / 同年全年均值 (标幺)')
-ax.grid(alpha=0.3); ax.legend(frameon=False, fontsize=9)
+    # (a) 合并散点 + 1°C分箱均值 + 合并拟合V线 + 采用基温
+    ax = axes[0]
+    ax.scatter(T_all, Y_all, s=10, alpha=0.30, color='#95a5a6', label='2022/2023逐日(标幺,已剔节假日)')
+    bins = np.arange(-10.0, 33.01, 1.0)
+    g = work.assign(bin=pd.cut(work['temp_mean'], bins))
+    cnt = g.groupby('bin', observed=True)['总负荷_pu'].count()
+    bm = g.groupby('bin', observed=True).agg(t=('temp_mean', 'mean'), y=('总负荷_pu', 'mean'))
+    bm = bm[cnt.to_numpy() >= 4]
+    ax.plot(bm['t'], bm['y'], 'o-', color='#c0392b', lw=1.8, ms=4, label='1°C分箱均值(算术平均)')
+    p = result['总负荷']['合并']
+    tt = np.linspace(-10, 32, 200)
+    bc, bh = p['base_winter'], p['base_summer']
+    slope_c = result['总负荷']['合并']['b_cold_pct'] / 100
+    slope_h = result['总负荷']['合并']['b_hot_pct'] / 100
+    vy = p.get('a', 1.0) + np.maximum(0, tt - bh) * slope_h + np.maximum(0, bc - tt) * slope_c
+    ax.plot(tt, vy, '-', color='#2c3e50', lw=1.8, label=f'V形拟合(合并$R^2$={p["r2"]:.3f})')
+    ax.axvline(adopted['总负荷']['base_summer'], color='#d35400', ls='--', lw=1.6,
+               label=f"夏基温{adopted['总负荷']['base_summer']}°C(两年平均)")
+    ax.axvline(adopted['总负荷']['base_winter'], color='#1f6fb2', ls='--', lw=1.6,
+               label=f"冬基温{adopted['总负荷']['base_winter']}°C(两年平均)")
+    ax.set_title('全年温度-日电量对比：电量开始升降的温度点(基温拐点)', fontsize=12)
+    ax.set_xlabel('山东16市日均温 (°C)'); ax.set_ylabel('日电量 / 同年全年均值 (标幺)')
+    ax.grid(alpha=0.3); ax.legend(frameon=False, fontsize=9)
 
-# (b) 分年分箱均值曲线 + 各年拐点 + 平均
-ax = axes[1]
-for year, color in [(2022, '#1f6fb2'), (2023, '#e67e22')]:
-    gy = work[work['date'].dt.year == year].assign(bin=pd.cut(work.loc[work['date'].dt.year == year, 'temp_mean'], bins))
-    c2 = gy.groupby('bin', observed=True)['总负荷_pu'].count()
-    b2 = gy.groupby('bin', observed=True).agg(t=('temp_mean', 'mean'), y=('总负荷_pu', 'mean'))
-    b2 = b2[c2.to_numpy() >= 4]
-    ax.plot(b2['t'], b2['y'], 'o-', color=color, lw=1.5, ms=3.5, label=f'{year}分箱均值')
-    r = result['总负荷'][str(year)]
-    ax.axvline(r['base_summer'], color=color, ls=':', lw=1.4)
-    ax.axvline(r['base_winter'], color=color, ls=':', lw=1.4)
-ax.axvline(adopted['总负荷']['base_summer'], color='#d35400', ls='--', lw=1.6,
-           label=f"夏基温{adopted['总负荷']['base_summer']}°C = 两年拐点平均")
-ax.axvline(adopted['总负荷']['base_winter'], color='#1f6fb2', ls='--', lw=1.6,
-           label=f"冬基温{adopted['总负荷']['base_winter']}°C = 两年拐点平均")
-ax.set_title(f'2022 vs 2023 拐点对比：采用值取两年拐点算术平均(非中位数)', fontsize=12)
-ax.set_xlabel('山东16市日均温 (°C)'); ax.set_ylabel('日电量 / 同年全年均值 (标幺)')
-ax.grid(alpha=0.3); ax.legend(frameon=False, fontsize=9)
+    # (b) 分年分箱均值曲线 + 各年拐点 + 平均
+    ax = axes[1]
+    for year, color in [(2022, '#1f6fb2'), (2023, '#e67e22')]:
+        gy = work[work['date'].dt.year == year].assign(bin=pd.cut(work.loc[work['date'].dt.year == year, 'temp_mean'], bins))
+        c2 = gy.groupby('bin', observed=True)['总负荷_pu'].count()
+        b2 = gy.groupby('bin', observed=True).agg(t=('temp_mean', 'mean'), y=('总负荷_pu', 'mean'))
+        b2 = b2[c2.to_numpy() >= 4]
+        ax.plot(b2['t'], b2['y'], 'o-', color=color, lw=1.5, ms=3.5, label=f'{year}分箱均值')
+        r = result['总负荷'][str(year)]
+        ax.axvline(r['base_summer'], color=color, ls=':', lw=1.4)
+        ax.axvline(r['base_winter'], color=color, ls=':', lw=1.4)
+    ax.axvline(adopted['总负荷']['base_summer'], color='#d35400', ls='--', lw=1.6,
+               label=f"夏基温{adopted['总负荷']['base_summer']}°C = 两年拐点平均")
+    ax.axvline(adopted['总负荷']['base_winter'], color='#1f6fb2', ls='--', lw=1.6,
+               label=f"冬基温{adopted['总负荷']['base_winter']}°C = 两年拐点平均")
+    ax.set_title(f'2022 vs 2023 拐点对比：采用值取两年拐点算术平均(非中位数)', fontsize=12)
+    ax.set_xlabel('山东16市日均温 (°C)'); ax.set_ylabel('日电量 / 同年全年均值 (标幺)')
+    ax.grid(alpha=0.3); ax.legend(frameon=False, fontsize=9)
 
-fig.suptitle('基温拐点判定：2022/2023全年温度-日电量V形拟合(已剔除过年与节假日, 标幺化口径)', fontsize=13.5)
-fig.tight_layout(rect=[0, 0, 1, 0.94])
-fig_out = os.path.join(FIGOUT, '基温拐点判定图.png')
-fig.savefig(fig_out, dpi=150)
-plt.close(fig)
-print('已输出:', fig_out)
+    fig.suptitle('基温拐点判定：2022/2023全年温度-日电量V形拟合(已剔除过年与节假日, 标幺化口径)', fontsize=13.5)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig_out = os.path.join(FIGOUT, '基温拐点判定图.png')
+    fig.savefig(fig_out, dpi=150)
+    plt.close(fig)
+    print('已输出:', fig_out)
+
+
+def main() -> None:
+    """基温拐点判定主流程:日表标幺→剔除→网格搜索→两年平均→输出。"""
+    os.makedirs(FIGOUT, exist_ok=True)
+    daily = load_daily_frame()
+    work, excl = filter_work_days(daily)
+
+    work['weekend'] = (work['date'].dt.dayofweek >= 5).astype(float)
+    work['date'] = pd.to_datetime(work['date'])
+    result = {}
+    for label in SERIES:
+        print(f'--- {label} 拐点搜索 ---')
+        result[label] = find_kinks(work, label)
+
+    adopted = adopt_kinks(result)
+    write_outputs(result, adopted, excl)
+    plot_kink_figure(work, result, adopted)
+
+
+if __name__ == '__main__':
+    main()
