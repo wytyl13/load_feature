@@ -26,3 +26,14 @@ __pycache__/
 !课题2_预测/**/*.docx
 课题2_预测/**/验证结果_原始数据/**
 课题2_预测/**/验证结果_仅2023/**
+
+# 课题2 重构副本(S10):同课题2 白名单,数据/输出不入库
+refactor/load_forecast/**
+!refactor/load_forecast/**/
+!refactor/load_forecast/**/*.py
+!refactor/load_forecast/**/*.md
+!refactor/load_forecast/**/*.txt
+!refactor/load_forecast/**/*.ps1
+!refactor/load_forecast/**/*.docx
+refactor/load_forecast/**/验证结果_原始数据/**
+refactor/load_forecast/**/验证结果_仅2023/**
