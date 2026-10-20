@@ -53,15 +53,10 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_DIR))
 DEFAULT_SOURCE_ROOT = PROJECT_DIR / "行业标幺8760曲线"
 DEFAULT_OUTPUT_ROOT = PROJECT_DIR / "2030行业8760标幺曲线_三假前当后周"
-DEFAULT_GENERATOR = (
-    PROJECT_DIR
-    / "存档"
-    / "02_需求实现逻辑"
-    / "04_标幺化8760生成"
-    / "generate_annual_normalized_curve_v2_多假_工作双休.py"
-)
+DEFAULT_GENERATOR = PROJECT_DIR / "07_8760曲线" / "generate_annual_normalized_curve_v2_多假_工作双休.py"
 
 
 @dataclass

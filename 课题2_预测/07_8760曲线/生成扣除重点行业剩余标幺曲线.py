@@ -34,16 +34,12 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_DIR))
+from project_paths import CLASSIFICATION_XLSX, TOTAL_LOAD_ROOT
 
-DEFAULT_TOTAL_ROOT = PROJECT_DIR
+DEFAULT_TOTAL_ROOT = TOTAL_LOAD_ROOT
 DEFAULT_SHAPE_ROOT = PROJECT_DIR / "行业标幺8760曲线"
-DEFAULT_ENERGY_XLSX = (
-    PROJECT_DIR
-    / "存档"
-    / "03_数据"
-    / "02_统计与电量锚点"
-    / "山东2020-2025_全社会用电分类表（全口径）.xlsx"
-)
+DEFAULT_ENERGY_XLSX = CLASSIFICATION_XLSX
 DEFAULT_OUTPUT_ROOT = PROJECT_DIR / "扣除重点行业剩余标幺曲线"
 
 

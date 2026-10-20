@@ -6,6 +6,7 @@
 输出: 预测结果_2020-2030/气温情景图/基温扫描与离散图.png
 """
 import os
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -15,8 +16,11 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DATA_ROOT = os.path.normpath(os.path.join(BASE, '..', '2026-08-12'))
-OUTROOT = os.path.join(BASE, '预测结果_2020-2030')
+sys.path.insert(0, os.path.dirname(BASE))
+from project_paths import FORECAST_ROOT, HOURLY_ROOT, TEMPERATURE_CSV
+DATA_ROOT = str(HOURLY_ROOT)
+TEMP_CSV = str(TEMPERATURE_CSV)
+OUTROOT = str(FORECAST_ROOT)
 FIGOUT = os.path.join(OUTROOT, '气温情景图')
 os.makedirs(FIGOUT, exist_ok=True)
 
@@ -27,7 +31,7 @@ SUMMER = [6, 7, 8, 9]
 WINTER = [11, 12, 1, 2]
 
 # ---------- 数据: 16市日均温 + 总负荷日电量(10类之和) ----------
-temp = pd.read_csv(os.path.join(BASE, 'temperature_daily_shandong.csv'), encoding='utf-8-sig')
+temp = pd.read_csv(TEMP_CSV, encoding='utf-8-sig')
 temp['date'] = pd.to_datetime(temp['date'])
 temp = temp[temp['date'].dt.year.isin([2022, 2023])].copy()
 

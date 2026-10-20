@@ -21,8 +21,11 @@ import numpy as np
 import pandas as pd
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(BASE, '20260616阿里巴巴2022.01-2023.12负荷数据')
-OUTROOT = os.path.normpath(os.path.join(BASE, '..', '2026-08-12'))
+PROJECT_DIR = os.path.dirname(BASE)
+sys.path.insert(0, PROJECT_DIR)
+from project_paths import HOURLY_ROOT, TOTAL_LOAD_ROOT
+SRC = os.path.join(PROJECT_DIR, '09_数据中心原始')
+OUTROOT = str(HOURLY_ROOT)
 
 # 16站口径 = 2022 有效口径: 3 站 2022 全年无记录(2023-02 起才齐全), 剔除后两年可比
 EXCLUDE_16 = ['玄铁站', '含光站', '飞天站']
@@ -91,7 +94,7 @@ def rebuild_rest9():
         assert t_old.equals(t_dc) and len(t_old) == 8760, f'{year} 时间轴不对齐'
         rest9 = (old['值'].to_numpy(float) - dc['值'].to_numpy(float)).round(4)
         # 恒等式: 实测总(0817\{year}\历史负荷数据（2019-2023）.csv) = Σ9行业 + 扣除9
-        act = readc('历史负荷数据（2019-2023）.csv', BASE, str(year))
+        act = readc('历史负荷数据%s.csv' % year, str(TOTAL_LOAD_ROOT))
         act_s = pd.Series(act['值'].to_numpy(float), index=pd.to_datetime(act['时间']))
         act_s = act_s.sort_index().to_numpy(float)
         s9 = np.zeros(8760)
@@ -121,7 +124,11 @@ def main():
         # 2022 应不变(16站过滤对2022无副作用): 覆盖前断言 diff=0
         if year == 2022 and os.path.exists(out):
             old = pd.read_csv(out, encoding='utf-8-sig')['值'].to_numpy(float)
-            assert np.abs(old - h.to_numpy()).max() < 1e-6, '2022 数据中心被意外改变!'
+            # 历史 CSV 按 4 位小数保存，重建过程中可能出现 0.0001 MW 的舍入差。
+            # 超过该量级才视为原始口径发生变化。
+            delta = float(np.abs(old - h.to_numpy()).max())
+            if delta > 1.0001e-4:
+                raise AssertionError('2022 数据中心被意外改变! max diff=%.7f' % delta)
         pd.DataFrame({'时间': h.index.strftime('%Y-%m-%d %H:%M:%S'), '值': h.to_numpy()}).to_csv(
             out, index=False, encoding='utf-8-sig')
         tag = '19站' if MODE_19 else '16站'

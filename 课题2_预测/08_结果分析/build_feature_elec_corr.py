@@ -18,6 +18,8 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(BASE))
+from project_paths import FORECAST_ROOT
 OUTDIR = os.path.join(BASE, '特征与电量相关性_20260914')
 os.makedirs(OUTDIR, exist_ok=True)
 
@@ -27,7 +29,7 @@ SURFACE, INK, INK2, MUTED = '#fcfcfb', '#0b0b0b', '#52514e', '#898781'
 GRID, BASELINE = '#e1e0d9', '#c3c2b7'
 
 # ---------- 数据 ----------
-df = pd.read_csv(os.path.join(BASE, '神经网络MLP预测电量_训练测试预测.csv'), encoding='utf-8-sig')
+df = pd.read_csv(os.path.join(str(FORECAST_ROOT), '神经网络MLP预测电量_训练测试预测.csv'), encoding='utf-8-sig')
 FEATS = ['第一产业增加值', '第二产业增加值', '第三产业增加值', '人口',
          '全体居民人均可支配收入', '城镇居民人均可支配收入', '农村居民人均可支配收入']
 col_of = {}

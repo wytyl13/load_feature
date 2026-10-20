@@ -10,17 +10,21 @@ ARIMA 滚动预测: 山东 GDP 总量(第一+第二+第三产业增加值)与人
 代码阅读要点：读取宏观序列后，先 ARIMA 外推 GDP 和人口，再用近十年双对数回归推算主电量；其余模型仅作对照。
 """
 import os
+import sys
 import numpy as np
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
 import statsmodels.api as sm
-from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import adfuller
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from arima_compat import ARIMA
+from project_paths import ENERGY_XLSX, PROJECT_ROOT
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.normpath(os.path.join(BASE, '..', '2026-08-12', '111.xlsx'))
-OUT = os.path.join(BASE, 'ARIMA预测2026-2030.xlsx')
+SRC = str(ENERGY_XLSX)
+OUT = os.path.join(str(PROJECT_ROOT / '预测结果_2020-2030'), 'ARIMA预测2026-2030_传统回归.xlsx')
+os.makedirs(os.path.dirname(OUT), exist_ok=True)
 
 # ---------- 1. 读 111.xlsx ----------
 df = pd.read_excel(SRC, sheet_name='Sheet1', header=None)

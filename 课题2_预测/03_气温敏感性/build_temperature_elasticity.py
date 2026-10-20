@@ -13,14 +13,17 @@
 输出: 气温弹性_2022_2023.csv + 气温基温扫描_2022_2023.csv + JSON(供2030气温情景)
 """
 import os
+import sys
 import json
 import numpy as np
 import pandas as pd
 
 # BASE 是脚本所在目录；原工程将温度 CSV 和结果放在此处，将历史 8760 放在相邻数据根目录。
 BASE = os.path.dirname(os.path.abspath(__file__))
-DATA_ROOT = os.path.normpath(os.path.join(BASE, '..', '2026-08-12'))
-TEMP_CSV = os.path.join(BASE, 'temperature_daily_shandong.csv')
+sys.path.insert(0, os.path.dirname(BASE))
+from project_paths import HOURLY_ROOT, TEMPERATURE_CSV
+DATA_ROOT = str(HOURLY_ROOT)
+TEMP_CSV = str(TEMPERATURE_CSV)
 
 INDUSTRY_FILES = ['互联网和相关服务_MW.csv', '化学原料和化学制品制造业_MW.csv',
                   '总负荷去掉九个行业负荷.csv', '有色金属冶炼和压延加工业_MW.csv', '汽车制造业_MW.csv',

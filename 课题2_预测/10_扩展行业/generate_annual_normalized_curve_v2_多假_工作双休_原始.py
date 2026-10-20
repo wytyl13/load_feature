@@ -46,7 +46,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
-DEFAULT_INPUT_DIR = Path(r"D:\项目\电规总院负荷预测项目\负荷特性生成\数据")
+DEFAULT_INPUT_DIR = Path(__file__).resolve().parents[1] / "06_生成器输入" / "总负荷去掉九个行业负荷"
 
 SPRING_FESTIVAL_DATES = {
     2020: date(2020, 1, 25),

@@ -13,6 +13,7 @@
       + 预测结果_2020-2030/气温情景图/基温拐点判定图.png
 """
 import os
+import sys
 import json
 import numpy as np
 import pandas as pd
@@ -23,8 +24,11 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DATA_ROOT = os.path.normpath(os.path.join(BASE, '..', '2026-08-12'))
-OUTROOT = os.path.join(BASE, '预测结果_2020-2030')
+sys.path.insert(0, os.path.dirname(BASE))
+from project_paths import FORECAST_ROOT, HOURLY_ROOT, TEMPERATURE_CSV
+DATA_ROOT = str(HOURLY_ROOT)
+TEMP_CSV = str(TEMPERATURE_CSV)
+OUTROOT = str(FORECAST_ROOT)
 FIGOUT = os.path.join(OUTROOT, '气温情景图')
 os.makedirs(FIGOUT, exist_ok=True)
 
@@ -61,7 +65,7 @@ def readc(f):
 
 # ---------- 数据: 16市日均温 + 逐日电量 ----------
 # 温度是 16 市等权日均温；负荷先由小时聚合为日，再按同年平均值标幺。
-temp = pd.read_csv(os.path.join(BASE, 'temperature_daily_shandong.csv'), encoding='utf-8-sig')
+temp = pd.read_csv(TEMP_CSV, encoding='utf-8-sig')
 temp['date'] = pd.to_datetime(temp['date'])
 temp = temp[temp['date'].dt.year.isin([2022, 2023])].copy()
 daily = temp[['date', 'temp_mean']].copy()

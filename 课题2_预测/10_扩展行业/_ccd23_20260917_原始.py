@@ -28,11 +28,12 @@ import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-D10 = HERE / '20260910'
-W16 = D10 / '_p16_work'
-SRC_IN = D10 / '_p15_work' / '输入' / '充换电服务业'   # 主链真身(已实证)
-Z = HERE / '20260916' / '02_需求实现逻辑' / '04_标幺化8760生成'
-OUT = HERE / '_ccd23_out_20260917'
+PROJECT = HERE.parent
+# 自包含版：输入和生成器均来自交付包，不再访问 20260910/20260916 历史工作目录。
+SRC_IN = PROJECT / '06_生成器输入' / '充换电服务业'
+W16 = HERE / '参考结果' / '2030充换电服务业_22+23'
+Z = HERE
+OUT = HERE / '验证结果_仅2023'
 
 GUARD_OLD = """                raw_week_norm[year][w_ - 1] / base_week_by_year[year][w_ - 1]
                 for year, w_ in srcs"""
@@ -66,7 +67,7 @@ def read_pu(p: Path) -> np.ndarray:
 
 def shape_stats(y: np.ndarray) -> dict:
     s = pd.Series(y, index=IDX)
-    mo = s.resample('ME').mean()
+    mo = s.resample('M').mean()
     return dict(
         利用小时=y.sum() / y.max(),
         峰值月=int(s.idxmax().month),
@@ -78,15 +79,19 @@ def shape_stats(y: np.ndarray) -> dict:
 
 # ---------- 0. 自检: 输入源必须能复现主链(22+23) ----------
 print('=== 自检: 输入源复现主链? ===')
-for method, fname in (('周法', 'generate_annual_normalized_curve_v2_多假_工作双休.py'),
-                      ('月法', 'generate_annual_normalized_curve_monthly_top3_typical_v2_多假_工作双休.py')):
+for method, fname in (('周法', 'generate_annual_normalized_curve_v2_多假_工作双休_原始.py'),
+                      ('月法', 'generate_annual_normalized_curve_monthly_top3_typical_v2_多假_工作双休_原始.py')):
     m = load_generator(fname, guard=True)
     d = Path(tempfile.mkdtemp(prefix='ccd23chk_'))
     m.generate(input_dir=SRC_IN, output_dir=d, target_year=2030,
                typical_years=[2022, 2023], holidays=['spring', 'may', 'national'],
                hist_years=[2022, 2023], pattern='hybrid', single_typical=True)
     chk = read_pu(d / '2030年全年小时标幺曲线.csv')
-    ref = read_pu(W16 / method / '充换电服务业' / '2030年全年小时标幺曲线.csv')
+    ref_path = W16 / method / '2030年全年小时标幺曲线.csv'
+    if not ref_path.exists():
+        print(f'  {method}: 包内没有历史参考曲线，跳过命中校验')
+        continue
+    ref = read_pu(ref_path)
     ok = np.abs(chk - ref).max() < 1e-12
     print(f'  {method}: 22+23 复跑 vs 主链 最大逐点差={np.abs(chk - ref).max():.2e}'
           f'  → {"✓ 命中" if ok else "✗ 不符, 输入源不对"}')
@@ -99,8 +104,8 @@ tmp_in = Path(tempfile.mkdtemp(prefix='ccd23in_'))
 shutil.copy2(SRC_IN / '历史负荷数据2023.csv', tmp_in / '历史负荷数据2023.csv')
 print(f'临时输入目录(仅 2023): {tmp_in}\n')
 
-GEN = (('周法', 'generate_annual_normalized_curve_v2_多假_工作双休.py'),
-       ('月法', 'generate_annual_normalized_curve_monthly_top3_typical_v2_多假_工作双休.py'))
+GEN = (('周法', 'generate_annual_normalized_curve_v2_多假_工作双休_原始.py'),
+       ('月法', 'generate_annual_normalized_curve_monthly_top3_typical_v2_多假_工作双休_原始.py'))
 
 new_curves, guarded_curves = {}, {}
 for method, fname in GEN:
@@ -123,7 +128,10 @@ for method, _ in GEN:
 print('\n=== 充换电 2030 标幺曲线: 主链(22+23) vs 新(仅23) ===')
 rows = []
 for method, _ in GEN:
-    old = read_pu(W16 / method / '充换电服务业' / '2030年全年小时标幺曲线.csv')
+    ref_path = W16 / method / '2030年全年小时标幺曲线.csv'
+    if not ref_path.exists():
+        continue
+    old = read_pu(ref_path)
     new = new_curves[method]
     so, sn = shape_stats(old), shape_stats(new)
     rows.append((method, so, sn))
@@ -145,17 +153,20 @@ for method, _ in GEN:
 print('\n=== 月度均值并排 ===')
 hdr = '  月      :' + ''.join(f'{i:>7d}' for i in range(1, 13))
 for method, _ in GEN:
-    old = read_pu(W16 / method / '充换电服务业' / '2030年全年小时标幺曲线.csv')
+    ref_path = W16 / method / '2030年全年小时标幺曲线.csv'
+    if not ref_path.exists():
+        continue
+    old = read_pu(ref_path)
     new = new_curves[method]
     print(f'\n【{method}】')
     print(hdr)
-    print('  旧22+23 :' + ''.join(f'{v:7.3f}' for v in pd.Series(old, index=IDX).resample('ME').mean()))
-    print('  新仅23  :' + ''.join(f'{v:7.3f}' for v in pd.Series(new, index=IDX).resample('ME').mean()))
+    print('  旧22+23 :' + ''.join(f'{v:7.3f}' for v in pd.Series(old, index=IDX).resample('M').mean()))
+    print('  新仅23  :' + ''.join(f'{v:7.3f}' for v in pd.Series(new, index=IDX).resample('M').mean()))
 
 # 2023 原始形状作对照
 raw = pd.read_csv(SRC_IN / '历史负荷数据2023.csv')
 raw.columns = ['时间', '值']
 raw = raw.set_index(pd.to_datetime(raw['时间']))['值']
-print('  2023原始:' + ''.join(f'{v:7.3f}' for v in raw.resample('ME').mean()))
+print('  2023原始:' + ''.join(f'{v:7.3f}' for v in raw.resample('M').mean()))
 
 print(f'\n输出目录: {OUT}')

@@ -11,6 +11,7 @@
 代码阅读要点：这是电量预测主实现，分为 ARIMA 特征外推和标准化 MLP 电量映射两步；回测与终测使用不同样本范围。
 """
 import os
+import sys
 import numpy as np
 import pandas as pd
 import warnings
@@ -18,12 +19,15 @@ warnings.filterwarnings('ignore')
 from sklearn.preprocessing import StandardScaler
 from sklearn.neural_network import MLPRegressor
 from sklearn.linear_model import Ridge
-from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import adfuller
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from arima_compat import ARIMA
+from project_paths import ENERGY_XLSX, PROJECT_ROOT
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.normpath(os.path.join(BASE, '..', '2026-08-12', '111.xlsx'))
-OUT = os.path.join(BASE, 'ARIMA预测2026-2030.xlsx')
+SRC = str(ENERGY_XLSX)
+OUT = os.path.join(str(PROJECT_ROOT / '预测结果_2020-2030'), 'ARIMA预测2026-2030.xlsx')
+os.makedirs(os.path.dirname(OUT), exist_ok=True)
 
 # ---------- 1. 读取与清洗(同 nn_forecast: 插值补缺) ----------
 raw = pd.read_excel(SRC, sheet_name=0, header=0)

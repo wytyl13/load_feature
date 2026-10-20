@@ -29,13 +29,14 @@ import pandas as pd
 HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
 WORKSPACE = PROJECT.parent
-ARCHIVE_DATA = WORKSPACE / "自己处理" / "存档" / "03_数据"
-DEFAULT_HOURLY_ROOT = ARCHIVE_DATA / "03_实测负荷8760"
-DEFAULT_DC_RAW_ROOT = ARCHIVE_DATA / "05_数据中心原始"
-DEFAULT_GENERATOR_ROOT = ARCHIVE_DATA / "06_生成器输入目录"
-DEFAULT_ENERGY_XLSX = ARCHIVE_DATA / "02_统计与电量锚点" / "111.xlsx"
-DEFAULT_EXISTING_2030 = WORKSPACE / "自己处理" / "2030行业标幺8760曲线"
-DEFAULT_ARCHIVE_SINGLE_2030 = WORKSPACE / "自己处理" / "存档" / "2030充换电服务业标幺曲线_仅2023_三假前当后周"
+# 交付包内置必要输入。历史外部数据仍可通过命令行参数覆盖。
+ARCHIVE_DATA = PROJECT
+DEFAULT_HOURLY_ROOT = PROJECT / "04_实测负荷8760"
+DEFAULT_DC_RAW_ROOT = PROJECT / "09_数据中心原始"
+DEFAULT_GENERATOR_ROOT = PROJECT / "06_生成器输入"
+DEFAULT_ENERGY_XLSX = PROJECT / "02_统计与电量锚点" / "111.xlsx"
+DEFAULT_EXISTING_2030 = HERE / "参考结果" / "2030行业标幺8760曲线"
+DEFAULT_ARCHIVE_SINGLE_2030 = HERE / "参考结果" / "2030充换电服务业标幺曲线_仅2023_三假前当后周"
 DEFAULT_OUT = HERE / "验证结果_原始数据"
 INDUSTRY_8 = [
     "互联网和相关服务_MW.csv",
@@ -222,7 +223,10 @@ def stage_generator_input(src_dir: Path, dst_dir: Path, years: tuple[int, ...]) 
         source = next((path for path in candidates if path.exists()), None)
         if source is None:
             raise FileNotFoundError(f"{src_dir} 缺少 {year} 输入")
-        shutil.copy2(source, dst_dir / f"历史负荷数据{year}.csv")
+        target = dst_dir / f"历史负荷数据{year}.csv"
+        # 默认生成器输入已经放在交付结果目录中；源和目标相同时无需再次复制。
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
 
 
 def read_curve(path: Path) -> np.ndarray:
@@ -312,9 +316,10 @@ def run_arima_ml_compat(energy_xlsx: Path, out_root: Path) -> dict[str, object]:
     text = source.read_text(encoding="utf-8")
     old_import = "from statsmodels.tsa.arima.model import ARIMA"
     fallback = '''try:\n    from statsmodels.tsa.arima.model import ARIMA\nexcept ImportError:\n    from statsmodels.tsa.arima_model import ARIMA as _LegacyARIMA\n    class ARIMA:\n        def __init__(self, endog, order):\n            self._model = _LegacyARIMA(endog, order=order)\n        def fit(self, method_kwargs=None):\n            return self._model.fit(disp=0)'''
-    if old_import not in text:
+    if old_import in text:
+        text = text.replace(old_import, fallback)
+    elif "from arima_compat import ARIMA" not in text:
         raise RuntimeError("forecast_arima_ml.py 的 ARIMA 导入行已变化，未自动改写")
-    text = text.replace(old_import, fallback)
     src_line = next(line for line in text.splitlines() if line.startswith("SRC = "))
     out_line = next(line for line in text.splitlines() if line.startswith("OUT = "))
     text = text.replace(src_line, f"SRC = r'{energy_xlsx}'")

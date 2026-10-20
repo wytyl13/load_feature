@@ -8,13 +8,17 @@
       + 月均温阈值表 (各月: 4年实际月均温 + 低/中/高情景月均温)
 """
 import os
+import sys
 import numpy as np
 import pandas as pd
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-OUTROOT = os.path.join(BASE, '预测结果_2020-2030')
+sys.path.insert(0, os.path.dirname(BASE))
+from project_paths import FORECAST_ROOT, TEMPERATURE_CSV
+OUTROOT = str(FORECAST_ROOT)
+os.makedirs(OUTROOT, exist_ok=True)
 
-temp = pd.read_csv(os.path.join(BASE, 'temperature_daily_shandong.csv'), encoding='utf-8-sig')
+temp = pd.read_csv(str(TEMPERATURE_CSV), encoding='utf-8-sig')
 temp['date'] = pd.to_datetime(temp['date'])
 temp['md'] = temp['date'].dt.strftime('%m-%d')   # 月-日 (跨年对齐用)
 

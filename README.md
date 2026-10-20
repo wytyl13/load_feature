@@ -14,6 +14,7 @@
 
 ```bash
 # 日常运行与课题2 全链路:直接用 anaconda base(Python 3.12.7,依赖已齐)
+# 课题2 须加 PYTHONNOUSERSITE=1:user-site pandas 3.0.5 与 statsmodels 0.14.2 冲突(DESIGN D13)
 C:/ProgramData/anaconda3/python.exe
 
 # 课题1 基准复现与回归(逐位一致需锁定版本):
@@ -30,28 +31,26 @@ C:/Users/weiyutao/.conda/envs/load_feature/python.exe run_example.py --output-di
 C:/Users/weiyutao/.conda/envs/load_feature/python.exe run_formal_2025_2060.py --end-year 2030 --output-dir <新目录>  # 正式(1000 抽样)
 ```
 
-课题2 环境检查与扩展行业(数据未到位前检查会报缺文件,属预期):
+课题2 环境检查与全链路(2026-10-20 自包含交付包,数据已内置):
 
 ```bash
-cd 课题2_预测/05_扩展行业
-C:/ProgramData/anaconda3/python.exe check_environment.py
-C:/ProgramData/anaconda3/python.exe run_original_extensions.py --hourly-root <03_实测负荷8760 目录> --dc-raw-root <05_数据中心原始 目录> --generator-root <生成器输入 目录> --energy-xlsx <111.xlsx>
+cd 课题2_预测
+PYTHONNOUSERSITE=1 C:/ProgramData/anaconda3/python.exe 10_扩展行业/check_environment.py   # 环境检查
+PYTHONNOUSERSITE=1 C:/ProgramData/anaconda3/python.exe run_delivery.py                     # 一键全链路(--skip-arima 跳过电量训练)
 ```
-
-课题2 输入数据落位(待提供,原工程 `03_数据` 整目录):`自己处理/存档/03_数据/`。
 
 ## 3 架构
 
 > 本章给模块划分与依赖方向(按项目实际裁剪)。
 
 ```
-入口层   run_tests.py / run_example.py / run_formal_2025_2060.py   check_environment.py / run_original_extensions.py
+入口层   run_tests.py / run_example.py / run_formal_2025_2060.py   run_delivery.py / check_environment.py / run_original_extensions.py
            ↓                                                     ↓
-模块层   课题1_主模型(workstreams_load_characteristic_model_v2)   课题2_预测(01—05 五个子链)
+模块层   课题1_主模型(workstreams_load_characteristic_model_v2)   课题2_预测(01/03/07/08/10 五个子链)
            ↓                                                     ↓
-数据层   inputs/(随包) + 上游 JSON                              自己处理/存档/03_数据(待提供)
+数据层   inputs/(随包) + 上游 JSON                              课题2_预测/(数据内置,02—06、09 目录)
            ↓                                                     ↓
-结果层   results/(68 表 + 逐时 parquet + 校验 JSON)              各子链输出(2030 行业曲线等)
+结果层   results/(68 表 + 逐时 parquet + 校验 JSON)              预测结果_2020-2030/ 与曲线目录
 ```
 
 | 模块 | 职责 | 编写规则 |
@@ -75,7 +74,7 @@ C:/ProgramData/anaconda3/python.exe run_original_extensions.py --hourly-root <03
 | 5 Bootstrap | 逐时曲线 | 每年每情景 1000 轨迹(块长 7,固定种子) | 轨迹与分位 | 主模型包 [1] |
 | 6 输出与校验 | 全部结果 | 68 表 + 逐时 parquet + 展示子集 + 独立发布校验 | results/ | 主模型包 [1] |
 
-课题2 主链(依据 `DESIGN.md` §5.2):01 电量预测(ARIMA+MLP)→ 02 气温敏感性(基温/CDD/HDD 三情景)→ 03 曲线生成(行业标幺 × 目标年电量 → MW)→ 04 结果分析(只读)→ 05 扩展行业(数据中心/充换电独立子链 + 恒等式校验)。逐步输入输出明细见 `课题2_预测/README.md`。
+课题2 主链(依据 `DESIGN.md` §4.3):01 电量预测(`01_电量预测/`,ARIMA+MLP)→ 02 气温敏感性(`03_气温敏感性/`,基温/CDD/HDD 三情景)→ 03 曲线生成(`07_8760曲线/`,行业标幺 × 目标年电量 → MW)→ 04 结果分析(`08_结果分析/`,只读)→ 05 扩展行业(`10_扩展行业/`,数据中心/充换电独立子链 + 恒等式校验)。逐步输入输出明细见 `课题2_预测/README.md`。
 
 ## 5 分实体明细
 
@@ -86,7 +85,7 @@ C:/ProgramData/anaconda3/python.exe run_original_extensions.py --hourly-root <03
 | 输入 | 课题1 | 副本山东负荷特性8760数据表、用电分类表、annual_energy_upstream.json、三份 config CSV |
 | 输入 | 课题2 | 111.xlsx、用电分类表、行业小时曲线、用户级曲线、数据中心 15 分钟 Excel、生成器输入 |
 | 计算单元 | 课题1 | 24 传统行业 + 1 修正组成(形状演化、年度装配、Bootstrap) |
-| 计算单元 | 课题2 | 01—05 五个子链(电量、温度、曲线、分析、扩展行业) |
+| 计算单元 | 课题2 | 五个子链(电量、温度、曲线、分析、扩展行业;目录 01/03/07/08/10) |
 | 约束 | 两模块 | 统一口径见 `DESIGN.md` §4(单位换算、标幺、自然负荷、timestamp 无时区) |
 
 ## 6 汇总输出
@@ -99,7 +98,8 @@ C:/ProgramData/anaconda3/python.exe run_original_extensions.py --hourly-root <03
 | 课题1_主模型/results/<运行>/逐时曲线/ | 省级逐时标幺轨迹 parquet | 课题1 |
 | 课题1_主模型/results/<运行>/正式调用_2030-2030/ | 平台调用子集 | 课题1 |
 | 课题1_主模型/results/example_01/ | 开发验收算例基准(列集冻结,md5 见 baselines/) | 课题1 |
-| 课题2_预测/05_扩展行业/输出 | 2030 行业级 8760 曲线与校验 | 课题2 |
+| 课题2_预测/预测结果_2020-2030/ | 电量预测 xlsx 与 2020/2021/2023/2030 行业 8760 | 课题2 |
+| 课题2_预测/2030行业有名值曲线/ 等 | 2030 行业标幺/有名值/剩余曲线(含校验,见 DESIGN §4.4) | 课题2 |
 | baselines/*.md5 | 基准与源码校验和底册 | 本项目 |
 
 ## 7 接口
@@ -113,5 +113,6 @@ C:/ProgramData/anaconda3/python.exe run_original_extensions.py --hourly-root <03
 <!-- 入口 -->
 [1] 课题1_主模型/workstreams_load_characteristic_model_v2/ 主模型包(pipeline.py 为组装入口)
 [2] 课题1_主模型/run_tests.py 回归入口
-[3] 课题2_预测/05_扩展行业/check_environment.py 环境检查
-[4] 课题2_预测/05_扩展行业/run_original_extensions.py 扩展行业参数化入口
+[3] 课题2_预测/run_delivery.py 一键全链路入口
+[4] 课题2_预测/10_扩展行业/check_environment.py 环境检查
+[5] 课题2_预测/10_扩展行业/run_original_extensions.py 扩展行业参数化入口

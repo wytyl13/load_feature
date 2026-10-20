@@ -9,16 +9,20 @@ ARIMA 滚动预测 2026-2035(10年): 一产/二产/三产增加值、人口
 代码阅读要点：本脚本只外推宏观特征及其增速，不直接生成负荷曲线；电量主链由 forecast_arima_ml.py 接收这些特征。
 """
 import os
+import sys
 import numpy as np
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
-from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import adfuller
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from arima_compat import ARIMA
+from project_paths import ENERGY_XLSX, PROJECT_ROOT
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.normpath(os.path.join(BASE, '..', '2026-08-12', '111.xlsx'))
-OUT = os.path.join(BASE, 'ARIMA增速预测_2026-2035.xlsx')
+SRC = str(ENERGY_XLSX)
+OUT = os.path.join(str(PROJECT_ROOT / '预测结果_2020-2030'), 'ARIMA增速预测_2026-2035.xlsx')
+os.makedirs(os.path.dirname(OUT), exist_ok=True)
 
 # ---------- 1. 读数据 ----------
 raw = pd.read_excel(SRC, sheet_name=0, header=0)

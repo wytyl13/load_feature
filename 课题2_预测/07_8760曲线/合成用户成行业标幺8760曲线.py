@@ -25,7 +25,10 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-DEFAULT_INPUT_ROOT = PROJECT_DIR / "补全后分行业数据"
+import sys
+sys.path.insert(0, str(PROJECT_DIR))
+from project_paths import USER_CURVE_ROOT
+DEFAULT_INPUT_ROOT = USER_CURVE_ROOT
 DEFAULT_OUTPUT_ROOT = PROJECT_DIR / "行业标幺8760曲线"
 
 

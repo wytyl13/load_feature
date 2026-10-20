@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate an annual hourly normalized load curve from historical hourly load.
 
-原始谱系 A 的月内前三峰值典型日生成器：每个月分别选取工作日/双休日高峰日，
-再与周峰层级和节假日修正拼接成目标年 8760 点。
+原始谱系 A 的周→日→小时生成器：先提取历史周峰和工作日/双休日典型日，
+再对春节、五一、十一做前一周/当周/后一周修正，最后拼接目标年 8760 点并按年峰值标幺化。
 
 v2 changes (2026-09-10, based on generate_annual_normalized_curve.py):
 1. Holiday mechanism generalized from Spring Festival only to
@@ -19,12 +19,10 @@ v2 changes (2026-09-10, based on generate_annual_normalized_curve.py):
    special weeks having the closest holiday-day count.
 2. Typical-day hourly templates are now split into 工作日(Mon-Fri) and
    双休日(Sat-Sun): every week of the target year has its own pair of
-   24h curves.  This variant builds them by month: for each typical year
-   and month select the 3 highest-peak WEEKDAYS and the 3 highest-peak
-   WEEKEND days, normalize each day by its own maximum, average, then
-   re-normalize; each week takes the pair of the month containing most of
-   its days (week_month).  Weeks still use the original weekly stitching
-   logic; holiday special weeks take the pair of the holiday weeks.
+   24h curves.  For this (weekly peak-day) variant the 工作日 curve is the
+   week's highest-peak weekday and the 双休日 curve the week's highest-peak
+   weekend day (per typical year, averaged and re-normalized; a partial
+   week missing one group falls back to the other group's curve).
 3. The intra-week 7-point day-peak layer is unchanged (single curve per
    week, holidays use actual historical holiday-week shapes).
 
@@ -35,11 +33,11 @@ Method:
    special weeks from their neighboring normal weeks.
 4. Estimate per-holiday impact factors from actual week peak / baseline.
 5. Generate the target year:
-   annual_hour_norm = week_peak_norm * day_peak_norm * monthly_typical_day_hour_norm,
-   where monthly_typical_day_hour_norm is chosen per day: 工作日 or 双休日 curve.
+   annual_hour_norm = week_peak_norm * day_peak_norm * typical_day_hour_norm,
+   where typical_day_hour_norm is chosen per day: 工作日 or 双休日 curve.
 
 Input: 历史负荷数据{year}.csv (columns 时间,值) inside --input-dir.
-Default output: <input_dir>/生成结果/{target}月内前三峰值日典型日_多假_工作双休
+Default output: <input_dir>/生成结果/{target}精简结果_多假_工作双休
 """
 
 from __future__ import annotations
@@ -51,7 +49,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
-DEFAULT_INPUT_DIR = Path(r"D:\项目\电规总院负荷预测项目\负荷特性生成\数据")
+DEFAULT_INPUT_DIR = Path(__file__).resolve().parents[1] / "06_生成器输入" / "总负荷去掉九个行业负荷"
 
 SPRING_FESTIVAL_DATES = {
     2020: date(2020, 1, 25),
@@ -416,6 +414,7 @@ def generate(
     pattern: str,
     single_typical: bool = False,
 ) -> dict[str, object]:
+    # hist_years 决定周峰层级；typical_years 决定 24 小时日形状，二者可以独立指定。
     all_source_years = sorted(set(hist_years + typical_years))
     load_by_year_day = load_history(input_dir, all_source_years)
     weeks_all = {year: split_weeks(year) for year in all_source_years}
@@ -481,6 +480,7 @@ def generate(
     }
 
     # ---- 周峰层: 无假期基准 + 各假期影响系数 ----
+    # 周峰先除以各历史年的年峰值，融合的是形状而不是历史 MW 量级。
     raw_week_norm: dict[int, list[float]] = {}
     for year in hist_years:
         weekly_peak = [
@@ -511,6 +511,7 @@ def generate(
             ) / len(srcs)
 
     # ---- 日峰层(周内7点分布, 不分工作日/双休日): 逻辑同原脚本 ----
+    # 日峰系数描述周内每天相对该周峰的强弱，后面与典型日小时曲线相乘。
     daily_raw_by_year: dict[int, list[list[float]]] = {}
     for year in hist_years:
         curves = []
@@ -535,45 +536,42 @@ def generate(
                 mean_curves([daily_raw_by_year[year][w_ - 1] for year, w_ in srcs])
             )
 
-    # ---- 典型日层: 工作日/双休日两条曲线 (月内前三峰值日法) ----
-    def week_month(week: list[date]) -> int:
-        counts: dict[int, int] = {}
-        for day in week:
-            counts[day.month] = counts.get(day.month, 0) + 1
-        return max(counts, key=lambda month: (counts[month], -month))
-
-    def month_group_curve(year: int, days: list[date], top_n: int = 3) -> list[float]:
-        """月内该组(工作日/双休日)日峰最高的 top_n 天: 单日先标幺, 平均后再标幺."""
-        selected = sorted(days, key=lambda day: daily_peak_all[year][day], reverse=True)[:top_n]
-        return norm_max(mean_curves([norm_max(load_by_year_day[year][day]) for day in selected]))
-
-    monthly_work: dict[int, dict[int, list[float]]] = {}
-    monthly_wknd: dict[int, dict[int, list[float]]] = {}
-    for year in typical_years:
-        monthly_work[year] = {}
-        monthly_wknd[year] = {}
-        for month in range(1, 13):
-            days = [day for day in daily_peak_all[year] if day.month == month]
-            work = [day for day in days if day.weekday() <= 4]
-            wknd = [day for day in days if day.weekday() >= 5]
-            monthly_work[year][month] = month_group_curve(year, work)
-            monthly_wknd[year][month] = month_group_curve(year, wknd)
+    # ---- 典型日层: 工作日/双休日两条曲线, 每周各一条 ----
+    # 工作日和双休日分别取代表性日，避免用一条曲线抹平周末行为差异。
+    def week_group_curves(year: int, week: list[date]) -> tuple[list[float], list[float]]:
+        """(工作日曲线, 双休日曲线): 各取组内日峰最高一天的24h曲线; 组空则互为兜底."""
+        days = [day for day in week if day in load_by_year_day[year]]
+        work = [day for day in days if day.weekday() <= 4]
+        wknd = [day for day in days if day.weekday() >= 5]
+        work_curve = norm_max(load_by_year_day[year][max_peak_day(work, daily_peak_all[year])]) if work else None
+        wknd_curve = norm_max(load_by_year_day[year][max_peak_day(wknd, daily_peak_all[year])]) if wknd else None
+        if work_curve is None:
+            work_curve = wknd_curve
+        if wknd_curve is None:
+            wknd_curve = work_curve
+        return work_curve, wknd_curve
 
     typical_raw_work: dict[int, list[list[float]]] = {}
     typical_raw_wknd: dict[int, list[list[float]]] = {}
     for year in typical_years:
-        typical_raw_work[year] = [monthly_work[year][week_month(week)] for week in weeks_all[year]]
-        typical_raw_wknd[year] = [monthly_wknd[year][week_month(week)] for week in weeks_all[year]]
+        curves_work = []
+        curves_wknd = []
+        for week in weeks_all[year]:
+            c_work, c_wknd = week_group_curves(year, week)
+            curves_work.append(c_work)
+            curves_wknd.append(c_wknd)
+        typical_raw_work[year] = curves_work
+        typical_raw_wknd[year] = curves_wknd
 
     if single_typical:
-        # 领导原版口径: 月内前三峰值日模板(不分工作日/双休日)
+        # 领导原版口径: 每周单条典型日曲线(周内日峰最高日), 不分工作日/双休日
         for year in typical_years:
-            single_month = {
-                month: month_group_curve(year, [day for day in daily_peak_all[year] if day.month == month])
-                for month in range(1, 13)
-            }
-            typical_raw_work[year] = [single_month[week_month(week)] for week in weeks_all[year]]
-            typical_raw_wknd[year] = [single_month[week_month(week)] for week in weeks_all[year]]
+            single = []
+            for week in weeks_all[year]:
+                days = [day for day in week if day in load_by_year_day[year]]
+                single.append(norm_max(load_by_year_day[year][max_peak_day(days, daily_peak_all[year])]))
+            typical_raw_work[year] = single
+            typical_raw_wknd[year] = single
 
     typical_base_work = {
         year: holiday_adjusted_vectors(typical_raw_work[year], typical_special[year])
@@ -605,6 +603,7 @@ def generate(
             )
 
     # ---- 目标年合成: 周峰 = 基准 × 假期系数; 小时 = 周峰 × 日峰 × 典型日(工作/双休) ----
+    # 三层相乘得到 8760 小时形状，最终再次除以全年最大值，保证最大标幺值为 1。
     raw_target_week = []
     for week_index in range(1, target_week_count + 1):
         base_value = base_week_curve[week_index - 1]
@@ -686,7 +685,7 @@ def generate(
         {"项目": "历史样本年", "值": "、".join(str(year) for year in hist_years)},
         {"项目": "典型日小时曲线来源", "值": "、".join(str(year) for year in typical_years)},
         {"项目": "假期处理", "值": "、".join(HOLIDAY_LABELS[name] for name in holidays) + f"（{pattern}）"},
-        {"项目": "典型日小时曲线方法", "值": "每周两条：工作日/双休日分别取所属月内日峰最高的3个工作日/3个双休日，单日先标幺、3日均值后再标幺；各周按周内天数最多的月份取该月曲线"},
+        {"项目": "典型日小时曲线方法", "值": "每周两条：工作日=周内日峰最高的周一至周五，双休日=周内日峰最高的周六/周日；按典型年平均后再标幺"},
     ]
     for name in holidays:
         if pattern == "span":
@@ -765,7 +764,7 @@ def parse_holidays(value: str) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate annual normalized hourly load curve with multi-holiday and weekday/weekend monthly top-3-day templates.")
+    parser = argparse.ArgumentParser(description="Generate annual normalized hourly load curve with multi-holiday and weekday/weekend templates.")
     parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR, help="Directory containing 历史负荷数据YYYY.csv")
     parser.add_argument("--output-dir", type=Path, default=None, help="Output directory")
     parser.add_argument("--target-year", type=int, default=2030, help="Target calendar year")
@@ -774,11 +773,11 @@ def main() -> None:
     parser.add_argument("--holidays", default="spring,may,national", help="Comma list from: spring,may,national")
     parser.add_argument("--holiday-pattern", default="pm1", choices=["pm1", "pm0", "p01", "core", "span", "hybrid"],
                         help="pm1=前1/当/后1三周(同春节), pm0=前1+当, p01=当+后1, core=仅当周, span=与假期日期区间重叠的周, hybrid=春节前当后+五一前当+十一当后")
-    parser.add_argument("--single-typical", action="store_true", help="单条典型日曲线(领导原版口径), 不分工作日/双休日")
+    parser.add_argument("--single-typical", action="store_true", help="每周单条典型日曲线(领导原版口径), 不分工作日/双休日")
     args = parser.parse_args()
 
     input_dir = resolve_windows_path(args.input_dir)
-    output_dir = resolve_windows_path(args.output_dir) if args.output_dir else input_dir / "生成结果" / f"{args.target_year}月内前三峰值日典型日_多假_工作双休"
+    output_dir = resolve_windows_path(args.output_dir) if args.output_dir else input_dir / "生成结果" / f"{args.target_year}精简结果_多假_工作双休"
     result = generate(
         input_dir=input_dir,
         output_dir=output_dir,

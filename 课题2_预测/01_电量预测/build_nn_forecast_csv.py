@@ -11,19 +11,23 @@ CSV 分段:
 代码阅读要点：这是 forecast_arima_ml.py 的可审计 CSV 版本，把训练、回测和未来预测放入一张长表；模型结构和随机种子保持一致。
 """
 import os
+import sys
 import numpy as np
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
 from sklearn.preprocessing import StandardScaler
 from sklearn.neural_network import MLPRegressor
-from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import adfuller
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from arima_compat import ARIMA
+from project_paths import ENERGY_XLSX, PROJECT_ROOT
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.normpath(os.path.join(BASE, '..', '2026-08-12', '111.xlsx'))
-ARIMA_XLSX = os.path.join(BASE, 'ARIMA预测2026-2030.xlsx')      # 既有结果, 仅读取(9特征参考列+自检基准)
-OUT = os.path.join(BASE, '神经网络MLP预测电量_训练测试预测.csv')
+SRC = str(ENERGY_XLSX)
+ARIMA_XLSX = os.path.join(str(PROJECT_ROOT / '预测结果_2020-2030'), 'ARIMA预测2026-2030.xlsx')
+OUT = os.path.join(str(PROJECT_ROOT / '预测结果_2020-2030'), '神经网络MLP预测电量_训练测试预测.csv')
+os.makedirs(os.path.dirname(OUT), exist_ok=True)
 
 # ---------- 1. 读取与清洗(与 forecast_arima_ml.py 完全一致) ----------
 raw = pd.read_excel(SRC, sheet_name=0, header=0)
@@ -114,7 +118,8 @@ p8_bt, p8_fit = ens_predict(nns8_bt, sc8_bt, df.loc[test_mask, FEAT8].values), e
 
 def mape(a, b):
     return float(np.mean(np.abs((np.array(a) - np.array(b)) / np.array(a))) * 100)
-print(f'回测MAPE: 4特征={mape(yte4 := df.loc[test_mask, "电力消费量"].values, p4_bt):.2f}% '
+yte4 = df.loc[test_mask, "电力消费量"].values
+print(f'回测MAPE: 4特征={mape(yte4, p4_bt):.2f}% '
       f'8特征={mape(yte4, p8_bt):.2f}%  (模型说明sheet记录: 3.81% / 2.73%)')
 
 # 终测模型(全样本1996-2025): 输入 ARIMA 外推特征 -> 2026-2030
