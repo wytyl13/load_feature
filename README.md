@@ -10,41 +10,46 @@
 
 > 本章给环境安装与核心运行命令,均可直接复制执行。
 
-环境(conda):
+环境安装(conda):
 
 ```bash
-# 日常运行与课题2 全链路:直接用 anaconda base(Python 3.12.7,依赖已齐)
-# 课题2 须加 PYTHONNOUSERSITE=1:user-site pandas 3.0.5 与 statsmodels 0.14.2 冲突(DESIGN D13)
-C:/ProgramData/anaconda3/python.exe
+# 环境一:日常运行与课题2 全链路,直接用 anaconda base(Python 3.12.7,依赖已齐)
+conda activate base
 
-# 课题1 基准复现与回归(逐位一致需锁定版本):
+# 环境二:课题1 回归与服务层(逐位一致判据只在锁定版本内成立)
 conda create -n load_feature python=3.13
-C:/Users/weiyutao/.conda/envs/load_feature/python.exe -m pip install -r requirements.txt
+conda activate load_feature
+pip install -r requirements.txt
 ```
 
-课题1 回归与算例:
+课题1 回归与算例(重构版 `refactor/load_model/`;原始交付 `课题1_主模型/` 留作参照):
 
 ```bash
-cd 课题1_主模型
-C:/Users/weiyutao/.conda/envs/load_feature/python.exe run_tests.py            # 262 项回归
-C:/Users/weiyutao/.conda/envs/load_feature/python.exe run_example.py --output-dir results/<目录>   # 快速算例(20 抽样)
-C:/Users/weiyutao/.conda/envs/load_feature/python.exe run_formal_2025_2060.py --end-year 2030 --output-dir <新目录>  # 正式(1000 抽样)
+conda activate load_feature
+cd refactor/load_model
+python run_tests.py                                                    # 262 项回归
+python run_example.py --output-dir results/<目录>                      # 快速算例(20 抽样)
+python run_formal_2025_2060.py --end-year 2030 --output-dir <新目录>   # 正式(1000 抽样)
 ```
 
-课题2 环境检查与全链路(2026-10-20 自包含交付包,数据已内置):
+课题2 环境检查与全链路(重构版 `refactor/load_forecast/`,数据已内置;原始交付 `课题2_预测/` 留作参照):
 
 ```bash
-cd 课题2_预测
-PYTHONNOUSERSITE=1 C:/ProgramData/anaconda3/python.exe 10_扩展行业/check_environment.py   # 环境检查
-PYTHONNOUSERSITE=1 C:/ProgramData/anaconda3/python.exe run_delivery.py                     # 一键全链路(--skip-arima 跳过电量训练)
+conda activate base
+$env:PYTHONNOUSERSITE = "1"   # 本会话生效;user-site pandas 3.0.5 与 statsmodels 0.14.2 冲突(DESIGN D13)
+cd refactor/load_forecast
+python 10_扩展行业/check_environment.py   # 环境检查
+python run_delivery.py                     # 一键全链路(--skip-arima 跳过电量训练)
 ```
 
 服务层启动(FastAPI,封装 refactor/load_model;前两行首次执行一次):
 
 ```bash
-C:/Users/weiyutao/.conda/envs/load_feature/python.exe -m pip install -r service/requirements.txt        # 服务依赖
-C:/Users/weiyutao/.conda/envs/load_feature/python.exe -m pip install -e refactor/load_model --no-deps   # 算法包 editable 安装
-cd service && C:/Users/weiyutao/.conda/envs/load_feature/python.exe start.py --port 8000                 # 启动,默认 127.0.0.1:8000
+conda activate load_feature
+pip install -r service/requirements.txt        # 服务依赖
+pip install -e refactor/load_model --no-deps   # 算法包 editable 安装
+cd service
+python start.py --port 8000                   # 启动,默认 127.0.0.1:8000
 ```
 
 ## 3 架构
@@ -56,17 +61,18 @@ cd service && C:/Users/weiyutao/.conda/envs/load_feature/python.exe start.py --p
            ↓ 只调算法包唯一入口 run_pipeline(editable 安装)
 入口层   run_tests.py / run_example.py / run_formal_2025_2060.py   run_delivery.py / check_environment.py / run_original_extensions.py
            ↓                                                     ↓
-模块层   课题1_主模型(workstreams_load_characteristic_model_v2)   课题2_预测(01/03/07/08/10 五个子链)
+模块层   refactor/load_model(主模型包;课题1_主模型 留参照)     refactor/load_forecast(五子链;课题2_预测 留参照)
            ↓                                                     ↓
-数据层   inputs/(随包) + 上游 JSON                              课题2_预测/(数据内置,02—06、09 目录)
+数据层   inputs/(随包) + 上游 JSON                              数据内置(02—06、09 目录)
            ↓                                                     ↓
 结果层   results/(68 表 + 逐时 parquet + 校验 JSON)              预测结果_2020-2030/ 与曲线目录
 ```
 
 | 模块         | 职责                                                           | 编写规则                     |
 | ------------ | -------------------------------------------------------------- | ---------------------------- |
-| 课题1_主模型 | 电量→小时分配:典型日演化 + Bootstrap 不确定性                 | `.claude/skills/` 通用规则 |
-| 课题2_预测   | 原始统计→年度电量→8760 曲线全链路                            | 同上                         |
+| 课题1_主模型 | 电量→小时分配:典型日演化 + Bootstrap 不确定性(留参照)         | `.claude/skills/` 通用规则 |
+| 课题2_预测   | 原始统计→年度电量→8760 曲线全链路(留参照)                    | 同上                         |
+| refactor/    | 课题1/课题2 代码级重构正典,行为与原始交付零差异(S8/S10)        | `algo-porting`             |
 | service/     | HTTP 服务层:上传校验→模板转 JSON→后台算法→基准 P50 结果提取 | `service-api`              |
 | baselines/   | 基准 md5 底册(重构/移植回归判据)                               | `algo-porting` §4         |
 
@@ -85,7 +91,7 @@ cd service && C:/Users/weiyutao/.conda/envs/load_feature/python.exe start.py --p
 | 5 Bootstrap    | 逐时曲线                          | 每年每情景 1000 轨迹(块长 7,固定种子)                        | 轨迹与分位     | 主模型包 [1] |
 | 6 输出与校验   | 全部结果                          | 68 表 + 逐时 parquet + 展示子集 + 独立发布校验               | results/       | 主模型包 [1] |
 
-课题2 主链(依据 `DESIGN.md` §4.3):01 电量预测(`01_电量预测/`,ARIMA+MLP)→ 02 气温敏感性(`03_气温敏感性/`,基温/CDD/HDD 三情景)→ 03 曲线生成(`07_8760曲线/`,行业标幺 × 目标年电量 → MW)→ 04 结果分析(`08_结果分析/`,只读)→ 05 扩展行业(`10_扩展行业/`,数据中心/充换电独立子链 + 恒等式校验)。逐步输入输出明细见 `课题2_预测/README.md`。
+课题2 主链(依据 `DESIGN.md` §4.3):01 电量预测(`01_电量预测/`,ARIMA+MLP)→ 02 气温敏感性(`03_气温敏感性/`,基温/CDD/HDD 三情景)→ 03 曲线生成(`07_8760曲线/`,行业标幺 × 目标年电量 → MW)→ 04 结果分析(`08_结果分析/`,只读)→ 05 扩展行业(`10_扩展行业/`,数据中心/充换电独立子链 + 恒等式校验)。逐步输入输出明细见 `refactor/load_forecast/README.md`。
 
 ## 5 分实体明细
 
@@ -115,6 +121,8 @@ cd service && C:/Users/weiyutao/.conda/envs/load_feature/python.exe start.py --p
 | baselines/*.md5                                      | 基准与源码校验和底册                                                  | 本项目   |
 | service/runs/<run_id>/result/baseline_p50_hourly.csv | 基准情景 P50 逐时标幺曲线(timestamp, load_pu;2025—2030 共 52,584 行) | 服务层   |
 | service/templates/annual_energy.xlsx                 | 年度电量模板(两张 sheet,列名=上游 JSON 键原样)                        | 服务层   |
+
+注:`refactor/load_model/results/` 与 `refactor/load_forecast/` 同构产出上表课题1/课题2 文件(正典运行入口,见第 2 章);service 端结果在 `service/runs/<run_id>/` 下,不与课题1 结果混放。
 
 ## 7 接口
 

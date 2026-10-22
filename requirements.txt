@@ -21,10 +21,10 @@ pytz==2026.5
 six==1.17.0
 tzdata==2026.5
 #
-# ---- 课题2《负荷特性预测》(交付区间见 课题2_预测/requirements.txt;下为 base 实装版) ----
-scipy==1.13.1
-statsmodels==0.14.2
-scikit-learn==1.5.1
-matplotlib==3.9.2
-python-docx==1.2.0
-pyyaml==6.0.1
+# # ---- 课题2《负荷特性预测》(交付区间见 课题2_预测/requirements.txt;下为 base 实装版) ----
+# scipy==1.13.1
+# statsmodels==0.14.2
+# scikit-learn==1.5.1
+# matplotlib==3.9.2
+# python-docx==1.2.0
+# pyyaml==6.0.1
