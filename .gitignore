@@ -27,6 +27,12 @@ __pycache__/
 课题2_预测/**/验证结果_原始数据/**
 课题2_预测/**/验证结果_仅2023/**
 
+
+课题1_主模型/.pytest_cache/
+课题1_主模型/inputs/
+课题1_主模型/results/
+
+
 # 课题2 重构副本(S10):同课题2 白名单,数据/输出不入库
 refactor/load_forecast/**
 !refactor/load_forecast/**/
@@ -37,3 +43,19 @@ refactor/load_forecast/**
 !refactor/load_forecast/**/*.docx
 refactor/load_forecast/**/验证结果_原始数据/**
 refactor/load_forecast/**/验证结果_仅2023/**
+
+refactor/load_model/inputs
+refactor/load_model/load_model_algo.egg-info
+refactor/load_model/results
+refactor/load_model/tests
+
+
+
+# 服务层运行工作区与数据库(运行产物,不入库)
+service/runs/
+service/templates/
+service/tools/
+baselines/
+.claude
+claude.md
+DESIGN.md

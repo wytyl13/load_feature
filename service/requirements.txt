@@ -1,0 +1,7 @@
+# 服务层依赖;算法依赖(pandas/numpy/pyarrow/openpyxl)走 conda load_feature 锁定版,不在此列
+fastapi==0.156.5
+uvicorn==0.54.0
+python-multipart==0.0.32
+SQLAlchemy==2.1.5
+aiosqlite==0.22.1
+greenlet==3.5.6

@@ -1,0 +1,15 @@
+# 课题1 算法包打包清单(S11 服务接入用):使 workstreams_load_characteristic_model_v2
+# 可被服务层以正常包方式 import(服务层规范禁止 sys.path 直插)。
+# 依赖不在声明内——运行环境走 conda load_feature 锁定版(D5/D15),pip 只做 editable 安装。
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "load-model-algo"
+version = "1.2.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools]
+packages = ["workstreams_load_characteristic_model_v2"]

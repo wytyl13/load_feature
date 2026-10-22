@@ -1,6 +1,6 @@
 # 负荷系统优化 · 设计文档
 
-> 顶层为待构建项目;课题1/课题2 各自成章,按"基本情况 / 输入数据 / 数据流转步骤 / 输出"四段表述;需求、口径、接口、进度、决策按 `design-doc` 规则附后。
+> 顶层为待构建项目;课题1/课题2/服务层各自成章,按"基本情况 / 输入数据 / 数据流转步骤 / 输出"四段表述;需求、口径、接口、进度、决策按 `design-doc` 规则附后。
 
 ## 1 需求
 
@@ -8,8 +8,9 @@
 
 - R1 梳理两个课题的处理逻辑并落档到本文件(2026-10-19 确认)。
 - R2 目录级重构:两课题各为一模块迁入统一项目,按 `.claude/skills/` 规范落位(2026-10-19 确认,已完成,见决策 D4)。
-- R3 课题1 代码级重构:先出原始流程表述(本文 §3),用户确认后出重构设计,再确认后执行(2026-10-19 确认,进行中)。
-- 待确认(不计入需求):复现验证 / 软件集成 / 方法优化的取舍,目标省份与年份范围。
+- R3 课题1 代码级重构:先出原始流程表述(本文 §3),用户确认后出重构设计,再确认后执行(2026-10-19 确认,已完成,见 D12)。
+- R4 课题1 服务层构建:FastAPI 封装 `refactor/load_model`,前端上传 Excel → 后台计算 → 轮询状态 → 取基准 P50 逐时标幺曲线(2026-10-21 确认,进行中,设计见 §5/D15)。
+- 待确认(不计入需求):复现验证 / 方法优化的取舍,目标省份与年份范围。
 
 ## 2 模块布局
 
@@ -23,6 +24,7 @@ load_feature/
     load_model/      课题1(主模型)副本,不含 results,在此重构
     load_forecast/   课题2(预测)重构产物,待启动
     common/          公共脚本(出现第一个公共脚本前保持空)
+  service/           ← 服务层(§5,R4):FastAPI 封装课题1 重构版;api/ + core/ + runs/(运行工作区),算法包引用 refactor/load_model 不复制
   交付包原始/        交付 zip 与说明文档包存档(不入 git)
 ```
 
@@ -257,25 +259,75 @@ main()                            # 编排:argv 解析(YEAR/--sens/--wkmax)+常�
 
 **执行结果(2026-10-20 收口):** 六步全部按表执行,每步重跑对应段后 D14 归一化比对零差异。分步验证:步骤3(01×2,含不带 --skip-arima 的审计复跑走 exec 兼容路径)、步骤4(03×4)、步骤5(build_new 拆段,四年重跑)。步骤6 收口:删全部受判输出后全新全链(run_delivery.py 16 段)+ 审计复跑(run_original_extensions.py 不带 --skip-arima)→ 比对通过,零差异(判据 139 文件,图 107/107);基准固化 `baselines/课题2_全链_重构后.md5`。全程 4 次中间比对 + 1 次收口全量比对均通过。分步提交:fb327da(步骤1-3)、a57f406(步骤4)、b2661fb(步骤5)、收口提交(步骤6)。
 
-## 5 两课题衔接
+## 5 服务层(课题1 接入)
+
+> FastAPI 封装课题1 重构版:前端上传 Excel → 后台计算 → 轮询状态 → 取逐时曲线;算法包 `refactor/load_model` 零改动,格式适配全部在服务层。
+
+### 5.1 基本情况
+
+把课题1 重构版封装成 HTTP 服务:前端上传输入 Excel,服务保存到文件、模板转 JSON、后台调 `run_pipeline`(接口约定见 §8),完成后交付**基准情景 P50 逐时标幺曲线(timestamp + load_pu 两列)**。长任务异步化:创建即返 job_id,前端轮询。工程落位根下 `service/`,按 `service-api` 目录结构分 `api/`(server/routers/schema)与 `core/`(manager/service/table/provider),算法包直接引用 `refactor/load_model`(经 pyproject.toml editable 安装为 load-model-algo,服务层禁止 sys.path 直插),不复制、不反向依赖。运行环境 conda load_feature(与逐位一致判据同环境,D5);服务依赖(fastapi/uvicorn/python-multipart/sqlalchemy/aiosqlite/greenlet)装入该环境,版本锁进 `service/requirements.txt`。
+
+### 5.2 输入数据
+
+前端每次运行上传(POST multipart/form-data):
+
+| # | 文件(form 名)           | 必传 | 结构                                                                                        | 维度                       |
+| - | ------------------------ | ---- | ------------------------------------------------------------------------------------------- | -------------------------- |
+| 1 | load_workbook.xlsx       | 是   | 原样结构:第1张 用电结构(不读)、第2张 历史负荷数据(2019-2023)、第3张起每用户一张(A列日期+B:Y列24小时) | `(U, D, 24)` + 全省 `(D, 24)` |
+| 2 | official_workbook.xlsx   | 是   | 原样结构:行业行 × 2020—2025 电量(万千瓦时)                                                  | `(行业, 6)`                |
+| 3 | annual_energy.xlsx(模板) | 否   | 两张 sheet,列名=上游 JSON 键名原样(零映射):`annual_electricity`(41列)、`scope_bridge`(16列);不传用服务端内置默认 | `(S×Y, 41)` + `(S×Y×Q, 16)` |
+
+参数(最小集):规划年起止年(默认 2025—2030,接口允许 2025—2060)、抽样档位(20 快速/1000 正式);其余 run_pipeline 参数(planning_scenarios/method/block_length 等)服务端固定默认值。
+
+固定配置(不上传,随服务分发):config 3 CSV(行业映射/官方映射/权重演化,与算法版本绑定)、内置默认 annual_energy_upstream.json。
+
+### 5.3 数据流转步骤
+
+| #  | 步骤       | 处理                                                                                                                                       | 落点                                |
+| -- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
+| 1  | 接收上传   | transport 校验(扩展名/大小上限/sheet 结构快检:历史表在位、24 小时列在位、模板两 sheet 在位),不过即 400                                    | `api/routers/run_router.py`         |
+| 2  | 落盘+登记  | 按参数名存 `service/runs/<run_id>/inputs/`;run 记录入 SQLite(状态=排队)                                                                  | `core/manager/run_manager.py`       |
+| 3  | 模板转换   | annual_energy.xlsx 两 sheet → records → `{"annual_electricity":…,"scope_bridge":…}` 写 inputs/annual_energy_upstream.json(列名原样)        | `core/manager/run_manager.py`       |
+| 4  | 后台计算   | BackgroundTasks + `asyncio.to_thread(run_pipeline, 6 显式路径+参数)`;状态=运行中;异常带上下文入库(状态=失败);全局串行一次一个              | `core/manager/run_manager.py`       |
+| 5  | 结果提取   | 读 `results/<运行>/逐时曲线/*.parquet`,筛 planning_scenario=基准 ∧ trajectory=P50_real → `timestamp, load_pu` 两列 CSV 落 runs/<run_id>/result/(52,584 行=5×8760+8784);全量 82 文件留服务端磁盘备查 | `core/manager/run_manager.py`       |
+| 6  | 交付       | 轮询返回 `{status, detailed_status, error_message}`;成功后 GET 下载第 5 步 CSV                                                            | `api/routers/run_router.py`         |
+
+run 记录(SQLite 单表,`core/table/run_record.py`):run_id/创建时间/参数 JSON/状态枚举(10 排队 20 运行中 30 成功 40 失败)/输入输出路径/错误信息。依赖单向:router → manager → service → provider → table;manager 是算法包唯一调用方。
+
+### 5.4 输出
+
+| 接口                            | 方法            | 返回                                                     |
+| ------------------------------- | --------------- | -------------------------------------------------------- |
+| `/api/load-model/runs/create`   | POST(multipart) | `{job_id}`,响应统一壳 `{success, message, data, timestamp}` |
+| `/api/load-model/runs/status`   | POST(body 传 job_id) | `{job_id, status(queued/running/succeeded/failed), error}` |
+| `/api/load-model/runs/results`  | GET(query 传 job_id) | `{views}`:每年一组 `{year, sheet_name, index, data}`(命名对齐 regional_power_system_optimization;每年按本年最大标幺,分年渲染) |
+| `/api/load-model/runs/download` | GET(query 传 job_id) | 基准 P50 逐时标幺曲线 CSV 文件下载(timestamp, load_pu) |
+| `/api/health`                   | GET             | `{status: ok}`                                            |
+
+接口命名与 JSON 键对齐 regional_power_system_optimization(结果端点 results、标识 job_id、状态英文名,2026-10-21 裁定),标识符不进 URL 路径;错误按类型映射状态码(参数/数据 400、不存在 404、状态冲突 409、未捕获 500),中文报错指明字段与文件。
+
+错误映射:transport 校验失败→400;算法 `_check_inputs`/质量门控抛 ValueError→400 带上下文;运行中断→状态=失败+error_message。进度粒度 v1 只做粗状态(排队/运行中/成功/失败),不做百分比、不解析算法日志。启动脚本 `argparse --port`(默认 8000)+ uvicorn。
+
+## 6 两课题衔接
 
 两课题都产出 8760 逐时曲线,分工点在年度电量:课题2 自己算电量,但只出单值预测;课题1 不算电量,但要求上游给三情景 × P10/P50/P90 加桥接表。课题2 的电量预测方法可作为课题1 的上游来源,中间需补一层"情景与分位"构造,课题1 文档将此列为"另行对接的研究模块"。
 
-## 6 统一口径
+## 7 统一口径
 
 - 1 亿千瓦时 = 100000 MWh;1 万千瓦时 = 10 MWh;小时功率 MW;`sum(MW)/100000 = 亿kWh`
 - 标幺(p.u.)只表达形状,按全年最大值归一为 1;恢复 MW 需按完整键关联年度最大负荷
 - 自然负荷已扣厂用电、线损、抽蓄,下游不得重复扣;P10≤P50≤P90;常规年 8760 点、闰年 8784 点
 - timestamp 为无时区本地业务时间,不得按 UTC 自动偏移
 
-## 7 接口
+## 8 接口
 
+- 服务 HTTP 接口(上传/轮询/结果查看/结果下载)见 §5.4
 - 课题1 CLI:`run_tests.py`(262 项回归)、`run_example.py`(快速算例 20 抽样)、`run_formal_2025_2060.py --end-year 2030 --output-dir <新目录>`(正式 1000 抽样)
 - 课题1 Python:`workstreams_load_characteristic_model_v2.pipeline.run_pipeline(...)` + `formal_output_validation.validate_formal_output(...)`,支持显式输入路径,便于任务封装
 - 课题2 CLI:`run_delivery.py`(一键全链路,`--skip-arima` 跳过电量训练)、`10_扩展行业/check_environment.py`(环境检查)、`10_扩展行业/run_original_extensions.py --hourly-root/--dc-raw-root/--generator-root/--energy-xlsx/--skip-arima`(换数据只走参数不改脚本,默认全指向包内)
 - 课题2 运行环境:anaconda base 须加 `PYTHONNOUSERSITE=1`(user-site pandas 3.0.5 与 statsmodels 0.14.2 不兼容,见 D13)
 
-## 8 实施规划与进度
+## 9 实施规划与进度
 
 | #  | 步骤                                                | 状态   | 验证结果                                                                                                                                                                                                                                                                                                                                                              |
 | -- | --------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -283,16 +335,17 @@ main()                            # 编排:argv 解析(YEAR/--sens/--wkmax)+常�
 | S2 | 阅读文档,梳理处理逻辑入档                           | 已完成 | 本文件 §3/§4                                                                                                                                                                                                                                                                                                                                                        |
 | S3 | 获取课题1 源码包(负荷特性主模型源码与算例_V1.2.zip) | 已完成 | 解压 71 文件;inputs 三份、config 三份 CSV、requirements 齐全,结构与文档 V1.5 约定一致                                                                                                                                                                                                                                                                                 |
 | S4 | 获取课题2 输入数据(原口径:外置 03_数据 目录)     | 已完成 | 口径变更(D13):2026-10-20 自包含交付包数据内置,无需外置目录;check_environment 全 OK                                                                                                                                                                                                              |
-| S5 | 与业务方确认优化方向(复现/集成/优化)                | 未开始 | —                                                                                                                                                                                                                                                                                                                                                                    |
+| S5 | 与业务方确认优化方向(复现/集成/优化)                | 已完成 | 2026-10-21 用户确认走服务集成方向(建课题1 服务层,见 R4/D15);复现与方法优化暂不做                                                                                                                                                                                                                                                                                    |
 | S6 | 课题1 环境构建与运行验证(回归+快速算例)             | 已完成 | 回归 262 通过 / 0 失败 / 0 跳过(89 秒);快速算例退出码 0,353 秒,sample_validation_report.json passed=true、failed=0(9 项检查);结果见 课题1_主模型/results/example_01                                                                                                                                                                                                   |
 | S7 | 目录级重构:两课题各为一模块 + 项目收口              | 已完成 | 判据①:262 通过(3.12 与 3.13 双环境各跑一遍);判据②:validation passed=true(9 项检查);判据③:conda load_feature(3.13+锁定版)重跑与 example_01 比对,74/82 文件 md5 原样一致,余 8 文件差异全部为输入路径前缀/输出目录名/时间戳/联动 sha256,零数值差异(过程见 D5);课题2 check_environment.py 输出与迁移前一致(缺同样 6 个数据文件);md5 底册入 baselines/;git 建库两笔提交 |
 | S8 | 课题1 代码级重构(R3)                                | 已完成 | 重构设计经用户确认("确认");步骤 1—6 全部执行:run_pipeline 839 行巨函数 → 208 行编排 + 8 段函数,每步 262 项测试通过;全量回归 82 文件,74 个逐位一致、8 个仅 D5 允许项差异,零数值差异;重构后基准固化 `baselines/课题1_example01_重构后.md5`(过程见 D5/D12)                                            |
 | S9 | 课题2 换用自包含交付包并全链路跑通                   | 已完成 | `课题2_预测/` 整体替换为 2026-10-20 包(数据内置,git 只入代码);run_delivery.py 16 阶段退出码 0(anaconda base + PYTHONNOUSERSITE=1;段数勘误见 D14);恒等式 2022/2023 通过(1.46e-11/2.91e-11 MW);数据中心重建逐点最大差 1e-4 MW、相关系数 1.0;2030 电量锚点 10,159.7 亿kWh 与转有名值锚点一致(过程见 D13) |
 | S10 | 课题2 代码级重构(§4.5)                             | 已完成 | 7 个模块级流程脚本函数化(01×2、03×4 包 main();build_new 865 行拆 main+7 段函数,全局变量改显式传参);分步重跑比对+收口全新全链(16 段+审计不带 --skip-arima)均零差异(判据 139 文件,图 107/107,D14 归一化口径);基准固化 baselines/课题2_全链_重构后.md5;执行结果见 §4.5 |
+| S11 | 课题1 服务层构建(R4,设计 §5)                      | 进行中 | 目录结构与代码完成(api/core 十一件,算法包 editable 安装为 load-model-algo);端到端验证通过(2026-10-21):404/400 校验链(扩展名/年份区间/sheet 缺失,含全角括号 sheet 名修正)各就位;真实上传三文件(含模板)后台运行 8.8 分钟成功,结果 CSV 52,584 行(2028 闰年 8784),与锁定基准 parquet 的基准×P50_real 切片**逐位一致**(1-ulp 假差异经二分定位为核对脚本 read_csv 默认解析器误差,float_precision=round_trip 后为零);结果查看接口 `GET runs/results` 上线(2026-10-21,views 按年分组对齐 regional 项目契约),200/404/409 三路径验证,JSON 值与 CSV 逐位一致;同日按用户裁定改接口契约:标识统一 job_id、状态回传英文名(queued/running/succeeded/failed)、状态与结果返回体精简(结果只余 views),已回归验证;待收口:提交、前端对接说明 |
 
-当前:S7/S8/S9/S10 完成——课题1 代码级重构收口,`refactor/load_model/` 为重构版,原始交付 `课题1_主模型/` 留作参照(锁定环境复现口径见 D5);课题2 已换 2026-10-20 自包含交付包并全链路跑通,代码级重构(S10)收口,`refactor/load_forecast/` 为重构版(行为与原包零差异,判据 D14,基准 `baselines/课题2_全链_重构后.md5`),原始交付 `课题2_预测/` 留作参照;优化方向未定(S5)。
+当前:S7/S8/S9/S10 完成——课题1 代码级重构收口,`refactor/load_model/` 为重构版,原始交付 `课题1_主模型/` 留作参照(锁定环境复现口径见 D5);课题2 已换 2026-10-20 自包含交付包并全链路跑通,代码级重构(S10)收口,`refactor/load_forecast/` 为重构版(行为与原包零差异,判据 D14,基准 `baselines/课题2_全链_重构后.md5`),原始交付 `课题2_预测/` 留作参照;S5 优化方向已定:软件集成,课题1 服务层(S11)设计入档待确认(§5)。
 
-## 9 决策记录
+## 10 决策记录
 
 > 只增。
 
@@ -310,3 +363,4 @@ main()                            # 编排:argv 解析(YEAR/--sens/--wkmax)+常�
 - 2026-10-19 D12:课题1 代码级重构(S8)收口。实际拆分为 8 个段函数(设计 6 个:读入与形状拆为 `_load_input_ledger`+`_build_history_shapes`,输出写入尾段独立为 `_write_run_outputs`;该尾段设计勘察时漏记,run_pipeline 实为 921—1759 行 839 行,已勘误);§3.5 已回填实际函数名与行号。全量回归判据按设计步骤 6 执行并通过(74/82 逐位一致,余 8 文件仅路径/时间戳/elapsed/级联 sha256,零数值差异);重构后 82 文件 md5 固化为 `baselines/课题1_example01_重构后.md5`。每步一提交:9d51707/126d696/76cc528/95b8d2f/6d5afdb。
 - 2026-10-20 D13:课题2 换用 2026-10-20 自包含交付包(zip `负荷特性预测_20261020`),整体替换 `课题2_预测/`(目录号 01—10,数据与参考输出内置,新增 `project_paths.py`/`arima_compat.py`/`run_delivery.py` 与交付手册 docx),取代 D4 迁入的旧版(旧版留 git 历史,zip 均存 `交付包原始/`);git 只入代码与文档(.gitignore 白名单),数据与参考输出不入库,S4 外置 03_数据 口径随之作废。环境事实:anaconda base 须 `PYTHONNOUSERSITE=1`——user-site(AppData\Roaming\Python\Python312)pandas 3.0.5 使 statsmodels 0.14.2 崩溃,禁用 user-site 后用自带 pandas 2.2.2 正常。依据用户初始指令"这里面有课题2缺失的文件……直接把它复制出来,然后把课题2跑通",交付版本与 git 策略经 AskUserQuestion 裁决"换用新自包含包"+"只入代码",细化修改方案经用户回复"确认"批准。
 - 2026-10-20 D14:课题2 代码级重构(S10)启动并当日收口,范围与步骤见 §4.5,执行结果见 §4.5 末段。判据=归一化逐位一致:允许且仅允许 (a) 包根路径前缀差异(`课题2_预测` ↔ `refactor/load_forecast`,含绝对/相对、正反斜杠形态——输出 csv/json 中多处内嵌绝对路径,已核实批量汇总/定标汇总/校验汇总等列);(b) xlsx 工作簿时间戳差异——xlsx 不比字节,改用单元格值哈希(openpyxl 逐 sheet 逐 cell,字符串单元格同样做路径归一);(c) png/svg 不入 md5 判据(matplotlib svg 内嵌生成日期,且为数值结果的衍生图),仅核对文件数量。其余 csv/json/txt 归一化后逐位一致,零数值差异,口径类比课题1 D5。确认链按用户豁免执行,依据用户原话:"设计完了直接执行,验证对比结果,不需要我确认"。另勘误:S9 验证结果"run_delivery.py 18 阶段"实为 16 段(1 环境检查 + 2 电量 + 4 气温 + 4 曲线 + 4 年份循环 + 1 审计),§4.3 与 S9 行同步改。
+- 2026-10-21 D15:服务层(课题1 接入)设计定案入档(§5),S5 优化方向随之定为软件集成(复现/方法优化暂不做)。要点:输入=前端上传 3 Excel(load_workbook/official_workbook 必传、annual_energy 模板可选,模板列名=上游 JSON 键原样零映射,模型只读 annual_electricity/scope_bridge 两键,其余 10 键为上游溯源不入模板)+固定 config 3 CSV;参数最小集(规划年起止+抽样 20/1000 两档);结果交付=基准情景 P50_real 轨迹切片(timestamp+load_pu 两列,标幺原样,2025—2030 共 52,584 行);技术口径:SQLite 单表 run 记录、粗状态不做进度百分比、全局串行一次一个、conda load_feature 环境装 fastapi/uvicorn/python-multipart、工程落位根下 service/(api/+core/,算法包引用 refactor/load_model 不复制)。依据用户原话:"这个输入数据我已经确认是,是前端直接上传excel文件,然后直接把数据给我""用原样列名"+AskUserQuestion 裁决("最小集(推荐)"、"基准 P50 单曲线两列"、"标幺 load_pu 原样(推荐)")。
