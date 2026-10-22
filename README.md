@@ -35,7 +35,7 @@ python run_formal_2025_2060.py --end-year 2030 --output-dir <新目录>   # 正�
 课题2 环境检查与全链路(重构版 `refactor/load_forecast/`,数据已内置;原始交付 `课题2_预测/` 留作参照):
 
 ```bash
-conda activate base
+conda activate load_feature
 $env:PYTHONNOUSERSITE = "1"   # 本会话生效;user-site pandas 3.0.5 与 statsmodels 0.14.2 冲突(DESIGN D13)
 cd refactor/load_forecast
 python 10_扩展行业/check_environment.py   # 环境检查
@@ -163,14 +163,12 @@ curl -X POST http://127.0.0.1:8000/api/load-model/runs/create \
 }
 ```
 
-### 7.2 状态轮询 `POST /api/load-model/runs/status`
+### 7.2 状态轮询 `GET /api/load-model/runs/status?job_id=<任务标识>`
 
-**传参**:
+**传参**:查询参数 `job_id`(必填;创建运行返回的任务标识):
 
-```json
-{
-  "job_id": "f71037c73c144c78a81dbc3b5e673f5d"  // 必填;创建运行返回的任务标识
-}
+```bash
+curl "http://127.0.0.1:8000/api/load-model/runs/status?job_id=f71037c73c144c78a81dbc3b5e673f5d"
 ```
 
 **return**(succeeded 示例):

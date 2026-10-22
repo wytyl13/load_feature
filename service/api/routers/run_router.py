@@ -13,7 +13,6 @@ from fastapi.responses import FileResponse
 
 from api.dependencies import get_run_manager
 from api.response import make_response
-from api.schema.run_schema import RunIdReq
 from core.manager.run_manager import RunManager, UploadedFile
 
 router = APIRouter(prefix="/api/load-model/runs", tags=["LoadModel"])
@@ -48,12 +47,13 @@ async def create_run(
     return make_response(data={"job_id": run_id})
 
 
-@router.post("/status")
+@router.get("/status")
 async def get_run_status(
-    req: RunIdReq, manager: RunManager = Depends(get_run_manager)
+    job_id: str = Query(..., description="任务标识"),
+    manager: RunManager = Depends(get_run_manager),
 ):
     """【状态轮询】返回任务状态与失败原因,不返回结果数据。"""
-    resp = await manager.get_status(req.job_id)
+    resp = await manager.get_status(job_id)
     return make_response(data=resp)
 
 

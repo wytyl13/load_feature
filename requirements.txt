@@ -1,7 +1,8 @@
 # 环境说明(详见 README.md Quick Start):
 # - 日常运行(两模块)与课题2 全链路:anaconda base,Python 3.12.7,依赖已全部在位
-# - 课题1 基准复现与回归:conda 环境 load_feature,Python 3.13 + 本文件锁定版本
-#   (逐位一致判据只在锁定版本内成立,跨版本存在 1-ulp 浮点差异,见 DESIGN.md 决策记录)
+# - 课题1 基准复现/回归与服务层部署:conda 环境 load_feature,Python 3.13,
+#   本文件一条命令装齐(含算法包路径注册):pip install -r requirements.txt
+#   (逐位一致判据只在锁定版本内成立,跨版本存在 1-ulp 浮点差异,见 DESIGN.md 决策记录 D5)
 #
 # ---- 课题1《负荷特性主模型》(交付锁定版,逐位复现必需) ----
 attrs==26.1.0
@@ -20,6 +21,16 @@ python-dateutil==2.9.0.post0
 pytz==2026.5
 six==1.17.0
 tzdata==2026.5
+#
+# ---- 服务层(S11,锁定版本同 service/requirements.txt) ----
+fastapi==0.156.5
+uvicorn==0.54.0
+python-multipart==0.0.32
+SQLAlchemy==2.1.5
+aiosqlite==0.22.1
+greenlet==3.5.6
+# 算法包路径注册(pip editable:只在 site-packages 写一条指回 refactor/load_model 的路径,零拷贝)
+-e refactor/load_model
 #
 # # ---- 课题2《负荷特性预测》(交付区间见 课题2_预测/requirements.txt;下为 base 实装版) ----
 # scipy==1.13.1
