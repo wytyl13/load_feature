@@ -212,6 +212,18 @@ class ForecastRunManager:
             error=record.error_message,
         )
 
+    async def get_recent_status(self, limit: int = 5) -> list[RunStatusResp]:
+        """查询课题2 最近若干条运行状态(历史任务,create_time 倒序)。
+
+        Args:
+            limit (int): 返回条数上限,默认 5。
+
+        Returns:
+            list[RunStatusResp]: 状态响应列表,最近在前。
+        """
+        records = await self.run_service.list_recent("load_forecast", limit)
+        return [RunManager._status_resp(record) for record in records]
+
     async def get_result_path(self, run_id: str, which: str) -> Path:
         """返回结果 CSV 路径,供下载接口使用。
 

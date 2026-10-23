@@ -174,10 +174,11 @@ curl -X POST http://127.0.0.1:8000/api/load-model/runs/create \
 
 ### 7.2 状态轮询 `GET /api/load-model/runs/status?job_id=<任务标识>`
 
-**传参**:查询参数 `job_id`(必填;创建运行返回的任务标识):
+**传参**:查询参数 `job_id`(可选;创建运行返回的任务标识)。不传则返回该课题最近 5 条历史任务状态列表(`data` 为数组,create_time 倒序,元素结构与单查相同,2026-10-23 增,课题2 同款见 §7.5):
 
 ```bash
 curl "http://127.0.0.1:8000/api/load-model/runs/status?job_id=f71037c73c144c78a81dbc3b5e673f5d"
+curl "http://127.0.0.1:8000/api/load-model/runs/status"   # → {"data": [{"job_id": …, "status": …, "error": …}, …最近 5 条]}
 ```
 
 **return**(succeeded 示例):
@@ -265,7 +266,12 @@ curl -X POST "http://127.0.0.1:8000/api/load-forecast/runs/create" \
 }
 ```
 
-**状态轮询** `GET /api/load-forecast/runs/status?job_id=<任务标识>` —— 返回结构与字段含义同 §7.2(`status`: queued/running/succeeded/failed;`error` 仅 failed 时非空,如"课题2 算法执行失败:RuntimeError: 居民生活/2022: expected 8760 rows, got 5(明细见 …/pipeline.log)")。
+**状态轮询** `GET /api/load-forecast/runs/status?job_id=<任务标识>` —— 返回结构与字段含义同 §7.2(`status`: queued/running/succeeded/failed;`error` 仅 failed 时非空,如"课题2 算法执行失败:RuntimeError: 居民生活/2022: expected 8760 rows, got 5(明细见 …/pipeline.log)")。**不传 job_id 返回课题2 最近 5 条历史任务状态列表**(create_time 倒序,元素结构同单查):
+
+```bash
+curl "http://127.0.0.1:8000/api/load-forecast/runs/status"
+# → {"data": [{"job_id": "…", "status": "succeeded", "error": null}, {"job_id": "…", "status": "failed", "error": "课题2 算法执行失败:…"}, …最近 5 条]}
+```
 
 **结果查看** `GET /api/load-forecast/runs/results?job_id=<任务标识>` —— 返回 `views` 固定三组:总负荷一张、行业 MW 一张、行业标幺一张(行业两视图列名=行业名,列序=9 行业标准名+其他殿后;index 均 8760 个 2030 逐时时刻;JSON 值与结果 CSV 逐位一致;状态非 succeeded 时 409,见 §7.6):
 

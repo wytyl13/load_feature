@@ -42,10 +42,12 @@ async def create_forecast_run(
 
 @router.get("/status")
 async def get_forecast_status(
-    job_id: str = Query(..., description="任务标识"),
+    job_id: str | None = Query(None, description="任务标识;不传则返回最近 5 条历史任务状态"),
     manager: ForecastRunManager = Depends(get_forecast_manager),
 ):
-    """【状态轮询】返回任务状态与失败原因,不返回结果数据。"""
+    """【状态轮询】传 job_id 返回单任务状态与失败原因;不传返回最近 5 条历史任务状态列表。"""
+    if job_id is None:
+        return make_response(data=await manager.get_recent_status())
     resp = await manager.get_status(job_id)
     return make_response(data=resp)
 

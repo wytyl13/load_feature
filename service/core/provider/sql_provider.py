@@ -11,6 +11,8 @@
 import logging
 from typing import Any, TypeVar
 
+from sqlalchemy import select
+
 from core.database import session_factory
 
 ModelT = TypeVar("ModelT")
@@ -50,6 +52,24 @@ class SqlProvider:
         """
         async with session_factory() as session:
             return await session.get(self.model, obj_id)
+
+    async def list_recent(
+        self, limit: int, filters: dict[str, Any] | None = None
+    ) -> list[ModelT]:
+        """按 create_time 倒序取最近若干条记录,可带等值过滤。
+
+        Args:
+            limit (int): 返回条数上限。
+            filters (dict[str, Any] | None): 字段名到值的等值过滤条件。
+
+        Returns:
+            list[ModelT]: 记录列表,最近在前。
+        """
+        async with session_factory() as session:
+            stmt = select(self.model).order_by(self.model.create_time.desc()).limit(limit)
+            if filters:
+                stmt = stmt.where(*[getattr(self.model, k) == v for k, v in filters.items()])
+            return list((await session.execute(stmt)).scalars())
 
     async def update(self, obj_id: str, data: dict[str, Any]) -> ModelT | None:
         """按主键更新给定字段。

@@ -45,6 +45,18 @@ class RunService:
         """
         return await self.sql_provider.get_by_id(run_id)
 
+    async def list_recent(self, topic: str, limit: int = 5) -> list[RunRecord]:
+        """按课题取最近的运行记录(create_time 倒序)。
+
+        Args:
+            topic (str): 课题标识(load_model/load_forecast)。
+            limit (int): 返回条数上限,默认 5。
+
+        Returns:
+            list[RunRecord]: 记录列表,最近在前。
+        """
+        return await self.sql_provider.list_recent(limit, filters={"topic": topic})
+
     async def update(self, run_id: str, dto: RunUpdateDTO) -> RunRecord | None:
         """按 run_id 更新给定字段。
 

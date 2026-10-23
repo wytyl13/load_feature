@@ -194,6 +194,27 @@ class RunManager:
             self.logger.error("查询状态异常:\n%s", traceback.format_exc())
             raise RuntimeError(f"[RunManager]-{run_id}- 查询状态失败: {exc}") from exc
 
+    async def get_recent_status(self, limit: int = 5) -> list[RunStatusResp]:
+        """查询课题1 最近若干条运行状态(历史任务,create_time 倒序)。
+
+        Args:
+            limit (int): 返回条数上限,默认 5。
+
+        Returns:
+            list[RunStatusResp]: 状态响应列表,最近在前。
+        """
+        records = await self.run_service.list_recent("load_model", limit)
+        return [self._status_resp(record) for record in records]
+
+    @staticmethod
+    def _status_resp(record) -> RunStatusResp:
+        """运行记录转状态响应结构(单查与历史列表共用)。"""
+        return RunStatusResp(
+            job_id=record.run_id,
+            status=RUN_STATUS_NAMES.get(record.status, "unknown"),
+            error=record.error_message,
+        )
+
     async def get_result_path(self, run_id: str) -> Path:
         """返回结果 CSV 路径,供下载接口使用。
 
