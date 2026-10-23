@@ -37,7 +37,8 @@ from workstreams_load_characteristic_model_v2.pipeline import run_pipeline
 
 HISTORY_SHEET_NAME = "历史负荷数据（2019-2023）"      # load_workbook 必含的全省历史曲线 sheet(括号为全角,与算法 config.py 一致)
 TEMPLATE_SHEETS = ("annual_electricity", "scope_bridge")  # 年度电量模板必含的两张 sheet
-BASELINE_SCENARIO = "基准"                             # 结果提取的目标情景
+PARAM_SCENARIOS = ("低碳", "基准", "高电气化")          # 规划情景允许取值(与算法包 SCENARIO_ORDER 一致)
+DEFAULT_SCENARIO = "基准"                              # 情景缺省值(旧运行记录 params 无 scenario 键时兜底)
 REPRESENTATIVE_TRAJECTORY = "P50_real"                 # 结果提取的目标代表轨迹
 PARAM_YEARS = (2025, 2060)                             # 规划年允许区间(含端点)
 PARAM_SAMPLES = (20, 1000)                             # 抽样数允许档位
@@ -52,7 +53,7 @@ class UploadedFile:
 
 
 class RunManager:
-    """运行组织:登记上传 → 后台执行算法 → 提取基准 P50 结果。"""
+    """运行组织:登记上传 → 后台执行算法 → 提取指定情景 P50 结果。"""
 
     def __init__(self, run_service: RunService) -> None:
         self.logger = logging.getLogger("RunManager")
@@ -73,7 +74,7 @@ class RunManager:
             load_workbook (UploadedFile): 用户日曲线工作簿(含全省历史曲线)。
             official_workbook (UploadedFile): 全社会用电分类表。
             annual_energy (UploadedFile | None): 年度电量模板,不传用包内默认。
-            params (dict): 运行参数(start_year/end_year/sample_size)。
+            params (dict): 运行参数(start_year/end_year/sample_size/scenario)。
 
         Returns:
             str: 运行标识 run_id。
@@ -134,11 +135,13 @@ class RunManager:
             self.logger.error("[RunManager]-%s- 运行记录不存在,后台任务退出", run_id)
             return
         params = record.params
+        scenario = params.get("scenario") or DEFAULT_SCENARIO
         input_dir = Path(record.input_dir)
         kwargs = dict(
             years=range(params["start_year"], params["end_year"] + 1),
             output_dir=record.output_dir,
             bootstrap_scenarios=params["sample_size"],
+            planning_scenarios=[scenario],
             load_workbook=str(input_dir / "load_workbook.xlsx"),
             official_workbook=str(input_dir / "official_workbook.xlsx"),
             require_parquet=True,
@@ -152,7 +155,7 @@ class RunManager:
             try:
                 await asyncio.to_thread(run_pipeline, **kwargs)
                 result_path = await asyncio.to_thread(
-                    self._extract_p50_csv, Path(record.output_dir)
+                    self._extract_p50_csv, Path(record.output_dir), scenario
                 )
                 await self.run_service.update(
                     run_id,
@@ -224,7 +227,10 @@ class RunManager:
             ConflictError: 运行未成功,结果尚未生成。
         """
         record = await self._require_succeeded(run_id)
-        views = await asyncio.to_thread(self._build_result_views, Path(record.result_path))
+        scenario = record.params.get("scenario") or DEFAULT_SCENARIO
+        views = await asyncio.to_thread(
+            self._build_result_views, Path(record.result_path), scenario
+        )
         return {"views": views}
 
     async def _require_succeeded(self, run_id: str) -> RunRecord:
@@ -263,10 +269,10 @@ class RunManager:
 
     @staticmethod
     def _validate_params(params: dict) -> None:
-        """参数校验:年份区间与抽样档位,错报指明字段名。
+        """参数校验:年份区间、抽样档位与情景取值,错报指明字段名。
 
         Args:
-            params (dict): 运行参数(start_year/end_year/sample_size)。
+            params (dict): 运行参数(start_year/end_year/sample_size/scenario)。
 
         Returns: None
         """
@@ -281,6 +287,10 @@ class RunManager:
             )
         if sample not in PARAM_SAMPLES:
             raise ValueError(f"参数 sample_size={sample} 不在允许档位 {PARAM_SAMPLES}")
+        if params.get("scenario", DEFAULT_SCENARIO) not in PARAM_SCENARIOS:
+            raise ValueError(
+                f"参数 scenario={params.get('scenario')} 不在允许取值 {PARAM_SCENARIOS}"
+            )
 
     @staticmethod
     def _check_file(uploaded: UploadedFile, max_bytes: int, kind: str) -> None:
@@ -346,11 +356,12 @@ class RunManager:
         )
 
     @staticmethod
-    def _extract_p50_csv(output_dir: Path) -> Path:
-        """从算法输出提取基准情景 P50 代表轨迹的两列 CSV(timestamp, load_pu)。
+    def _extract_p50_csv(output_dir: Path, scenario: str) -> Path:
+        """从算法输出提取指定情景 P50 代表轨迹的两列 CSV(timestamp, load_pu)。
 
         Args:
             output_dir (Path): 算法输出目录。
+            scenario (str): 结果提取的目标情景。
 
         Returns:
             Path: 结果 CSV 路径。
@@ -365,22 +376,23 @@ class RunManager:
             parquet, columns=["timestamp", "planning_scenario", "trajectory", "load_pu"]
         )
         picked = frame[
-            (frame["planning_scenario"] == BASELINE_SCENARIO)
+            (frame["planning_scenario"] == scenario)
             & (frame["trajectory"] == REPRESENTATIVE_TRAJECTORY)
         ]
         if picked.empty:
-            raise ValueError("逐时曲线中未找到基准情景 P50_real 轨迹")
-        result_path = output_dir.parent / "result" / "baseline_p50_hourly.csv"
+            raise ValueError(f"逐时曲线中未找到{scenario}情景 P50_real 轨迹")
+        result_path = output_dir.parent / "result" / f"{scenario}_p50_hourly.csv"
         result_path.parent.mkdir(parents=True, exist_ok=True)
         picked[["timestamp", "load_pu"]].to_csv(result_path, index=False)
         return result_path
 
     @staticmethod
-    def _build_result_views(csv_path: Path) -> list[dict]:
+    def _build_result_views(csv_path: Path, scenario: str) -> list[dict]:
         """结果 CSV 转按年分组的绘图视图(float_precision 取 round_trip,值与 CSV 逐位一致)。
 
         Args:
             csv_path (Path): 结果 CSV 路径。
+            scenario (str): 结果对应的规划情景,用于 sheet_name 标签。
 
         Returns:
             list[dict]: 每年一组 {year, sheet_name, index, data}(data 为列数组,单列 load_pu)。
@@ -391,7 +403,7 @@ class RunManager:
             views.append(
                 {
                     "year": int(year),
-                    "sheet_name": f"baseline_p50_{year}",
+                    "sheet_name": f"{scenario}_p50_{year}",
                     "index": rows["timestamp"].tolist(),
                     "data": [{"column_name": "load_pu", "data": rows["load_pu"].tolist()}],
                 }

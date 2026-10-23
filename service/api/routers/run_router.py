@@ -27,6 +27,7 @@ async def create_run(
     start_year: int = Form(2025, description="规划起始年,2025—2060"),
     end_year: int = Form(2030, description="规划结束年,2025—2060"),
     sample_size: int = Form(20, description="Bootstrap 抽样数,20 快速/1000 正式"),
+    scenario: str = Form("基准", description="规划情景:低碳/基准/高电气化,单算该情景"),
     manager: RunManager = Depends(get_run_manager),
 ):
     """【创建运行】保存上传文件并登记运行,转后台计算,返回 run_id。"""
@@ -41,7 +42,12 @@ async def create_run(
             official_workbook.filename or "", await official_workbook.read()
         ),
         annual_energy=annual_file,
-        params={"start_year": start_year, "end_year": end_year, "sample_size": sample_size},
+        params={
+            "start_year": start_year,
+            "end_year": end_year,
+            "sample_size": sample_size,
+            "scenario": scenario,
+        },
     )
     background_tasks.add_task(manager.execute_run, run_id)
     return make_response(data={"job_id": run_id})
@@ -62,7 +68,7 @@ async def get_run_results(
     job_id: str = Query(..., description="任务标识"),
     manager: RunManager = Depends(get_run_manager),
 ):
-    """【结果查看】返回基准 P50 曲线 JSON 视图(按年分组,供前端绘图)。"""
+    """【结果查看】返回指定情景 P50 曲线 JSON 视图(按年分组,供前端绘图)。"""
     views = await manager.get_result_views(job_id)
     return make_response(data=views)
 
@@ -72,6 +78,6 @@ async def download_result(
     job_id: str = Query(..., description="任务标识"),
     manager: RunManager = Depends(get_run_manager),
 ):
-    """【结果下载】任务成功后下载基准 P50 逐时标幺曲线 CSV(timestamp, load_pu)。"""
+    """【结果下载】任务成功后下载指定情景 P50 逐时标幺曲线 CSV(timestamp, load_pu)。"""
     path = await manager.get_result_path(job_id)
-    return FileResponse(path, filename="baseline_p50_hourly.csv")
+    return FileResponse(path, filename=path.name)

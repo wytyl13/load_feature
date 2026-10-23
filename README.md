@@ -4,7 +4,7 @@
 
 > 本章说清项目做什么、输入是什么、输出是什么。
 
-本项目以两个已交付课题为模块做负荷系统优化。课题1《负荷特性主模型》输入历史全省及用户曲线、官方行业电量、上游年度电量 JSON 与三份 config,输出 2025—2060(常用 2030)三情景逐时 8760 负荷曲线与 68 张结果表。课题2《负荷特性预测》输入宏观特征、用电分类表、行业/用户小时曲线与数据中心 15 分钟原始数据,输出 2030 年行业级 8760 逐时曲线。两模块处理逻辑详见 `DESIGN.md` §3/§4,统一口径见 §7。顶层提供服务层(FastAPI,`service/`),把课题1 重构版封装为"上传 Excel → 后台计算 → 轮询状态 → 下载基准 P50 逐时曲线"的 HTTP 接口(设计 `DESIGN.md` §5,端点见本文第 7 章)。
+本项目以两个已交付课题为模块做负荷系统优化。课题1《负荷特性主模型》输入历史全省及用户曲线、官方行业电量、上游年度电量 JSON 与三份 config,输出 2025—2060(常用 2030)三情景逐时 8760 负荷曲线与 68 张结果表。课题2《负荷特性预测》输入宏观特征、用电分类表、行业/用户小时曲线与数据中心 15 分钟原始数据,输出 2030 年行业级 8760 逐时曲线。两模块处理逻辑详见 `DESIGN.md` §3/§4,统一口径见 §7。顶层提供服务层(FastAPI,`service/`),把课题1 重构版封装为"上传 Excel → 后台计算 → 轮询状态 → 下载指定情景 P50 逐时曲线"的 HTTP 接口(设计 `DESIGN.md` §5,端点见本文第 7 章)。
 
 ## 2 Quick Start
 
@@ -73,7 +73,7 @@ python start.py --port 8000                   # 启动,默认 127.0.0.1:8000
 | 课题1_主模型 | 电量→小时分配:典型日演化 + Bootstrap 不确定性(留参照)         | `.claude/skills/` 通用规则 |
 | 课题2_预测   | 原始统计→年度电量→8760 曲线全链路(留参照)                    | 同上                         |
 | refactor/    | 课题1/课题2 代码级重构正典,行为与原始交付零差异(S8/S10)        | `algo-porting`             |
-| service/     | HTTP 服务层:上传校验→模板转 JSON→后台算法→基准 P50 结果提取 | `service-api`              |
+| service/     | HTTP 服务层:上传校验→模板转 JSON→后台算法→指定情景 P50 结果提取 | `service-api`              |
 | baselines/   | 基准 md5 底册(重构/移植回归判据)                               | `algo-porting` §4         |
 
 ## 4 算法全流程
@@ -119,7 +119,7 @@ python start.py --port 8000                   # 启动,默认 127.0.0.1:8000
 | 课题2_预测/预测结果_2020-2030/                       | 电量预测 xlsx 与 2020/2021/2023/2030 行业 8760                        | 课题2    |
 | 课题2_预测/2030行业有名值曲线/ 等                    | 2030 行业标幺/有名值/剩余曲线(含校验,见 DESIGN §4.4)                 | 课题2    |
 | baselines/*.md5                                      | 基准与源码校验和底册                                                  | 本项目   |
-| service/runs/<run_id>/result/baseline_p50_hourly.csv | 基准情景 P50 逐时标幺曲线(timestamp, load_pu;2025—2030 共 52,584 行) | 服务层   |
+| service/runs/<run_id>/result/{情景}_p50_hourly.csv | 指定情景(默认基准)P50 逐时标幺曲线(timestamp, load_pu;2025—2030 共 52,584 行) | 服务层   |
 | service/templates/annual_energy.xlsx                 | 年度电量模板(两张 sheet,列名=上游 JSON 键原样)                        | 服务层   |
 
 注:`refactor/load_model/results/` 与 `refactor/load_forecast/` 同构产出上表课题1/课题2 文件(正典运行入口,见第 2 章);service 端结果在 `service/runs/<run_id>/` 下,不与课题1 结果混放。
@@ -140,6 +140,7 @@ annual_energy: binary      #可选;年度电量模板(.xlsx,两张 sheet,列名=
 start_year: 2025           #可选,默认 2025;规划起始年(2025—2060)
 end_year: 2030             #可选,默认 2030;规划结束年
 sample_size: 20            #可选,默认 20;Bootstrap 抽样数,只允许 20(快速)/1000(正式)
+scenario: 基准             #可选,默认 基准;规划情景 低碳/基准/高电气化,单算该情景并返回其 P50
 ```
 
 ```bash
@@ -147,7 +148,7 @@ curl -X POST http://127.0.0.1:8000/api/load-model/runs/create \
   -F "load_workbook=@副本山东负荷特性8760数据表.xlsx" \
   -F "official_workbook=@山东2020-2025_全社会用电分类表（全口径）.xlsx" \
   -F "annual_energy=@annual_energy.xlsx" \
-  -F "start_year=2025" -F "end_year=2030" -F "sample_size=20"
+  -F "start_year=2025" -F "end_year=2030" -F "sample_size=20" -F "scenario=基准"
 ```
 
 **return**(创建即受理,计算转后台):
@@ -202,7 +203,7 @@ curl "http://127.0.0.1:8000/api/load-model/runs/results?job_id=f71037c73c144c78a
     "views": [        // 必返;每年一组,一组一张图
       {
         "year": 2025, // 该组年份
-        "sheet_name": "baseline_p50_2025",  // 组名(=文件名_年份)
+        "sheet_name": "基准_p50_2025",  // 组名(=情景_文件名_年份)
         "index": ["2025-01-01 00:00:00", "2025-01-01 01:00:00"],  // 该年逐时时刻,与 data 等长
         "data": [     // 列数组(单曲线不分序列/参考线)
           {"column_name": "load_pu", "data": [0.505507618705083, 0.48492261178380186]}  // 标幺负荷,值与 CSV 逐位一致
@@ -217,10 +218,10 @@ curl "http://127.0.0.1:8000/api/load-model/runs/results?job_id=f71037c73c144c78a
 ### 7.4 结果下载 `GET /api/load-model/runs/download?job_id=<任务标识>`
 
 ```bash
-curl -o baseline_p50_hourly.csv "http://127.0.0.1:8000/api/load-model/runs/download?job_id=f71037c73c144c78a81dbc3b5e673f5d"
+curl -o 基准_p50_hourly.csv "http://127.0.0.1:8000/api/load-model/runs/download?job_id=f71037c73c144c78a81dbc3b5e673f5d"
 ```
 
-返回 CSV 文件(UTF-8),两列:`timestamp`(逐时时刻)与 `load_pu`(基准情景 P50 轨迹标幺负荷,年最大=1);默认参数下 52,584 行(2025—2030,含闰年 2028 的 8784 行)。
+返回 CSV 文件(UTF-8),两列:`timestamp`(逐时时刻)与 `load_pu`(指定情景 P50 轨迹标幺负荷,年最大=1),文件名 `{情景}_p50_hourly.csv`;默认参数下 52,584 行(2025—2030,含闰年 2028 的 8784 行)。
 
 ### 7.5 错误映射
 
