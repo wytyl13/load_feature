@@ -137,7 +137,11 @@ python start.py --port 8000                   # 启动,默认 127.0.0.1:8000
 > 本章给服务层 HTTP 端点的传参与返回示例(启动命令见第 2 章;业务规则见 `DESIGN.md` §5)。
 > 所有响应为统一壳 `{success, message, data, timestamp}`;计算任务全局串行,并发创建的运行排队执行(快速档约 9 分钟,正式档更长)。
 
-### 7.1 创建运行 `POST /api/load-model/runs/create`
+### 7.1 课题1 接口 `/api/load-model/runs`
+
+电量→逐时分配主模型;进程内调用 `refactor/load_model`(锁定环境,快速档约 9 分钟)。三端点:create(上传/参数)→ status(轮询/历史)→ results(曲线视图)。
+
+#### 创建运行 `POST /api/load-model/runs/create`
 
 **传参**(multipart/form-data,文件以 binary 传):
 
@@ -172,9 +176,9 @@ curl -X POST http://127.0.0.1:8000/api/load-model/runs/create \
 }
 ```
 
-### 7.2 状态轮询 `GET /api/load-model/runs/status?job_id=<任务标识>`
+#### 状态轮询 `GET /api/load-model/runs/status?job_id=<任务标识>`
 
-**传参**:查询参数 `job_id`(可选;创建运行返回的任务标识)。不传则返回该课题最近 5 条历史任务状态列表(`data` 为数组,create_time 倒序,元素结构与单查相同,2026-10-23 增,课题2 同款见 §7.5):
+**传参**:查询参数 `job_id`(可选;创建运行返回的任务标识)。不传则返回该课题最近 5 条历史任务状态列表(`data` 为数组,create_time 倒序,元素结构与单查相同,2026-10-23 增,课题2 同款见 §7.2):
 
 ```bash
 curl "http://127.0.0.1:8000/api/load-model/runs/status?job_id=f71037c73c144c78a81dbc3b5e673f5d"
@@ -196,7 +200,7 @@ curl "http://127.0.0.1:8000/api/load-model/runs/status"   # → {"data": [{"job_
 }
 ```
 
-### 7.3 结果查看 `GET /api/load-model/runs/results?job_id=<任务标识>`
+#### 结果查看 `GET /api/load-model/runs/results?job_id=<任务标识>`
 
 ```bash
 curl "http://127.0.0.1:8000/api/load-model/runs/results?job_id=f71037c73c144c78a81dbc3b5e673f5d"
@@ -224,19 +228,13 @@ curl "http://127.0.0.1:8000/api/load-model/runs/results?job_id=f71037c73c144c78a
 }
 ```
 
-### 7.4 结果下载 `GET /api/load-model/runs/download?job_id=<任务标识>`
+### 7.2 课题2 接口 `/api/load-forecast/runs`(2026-10-23,S13)
 
-```bash
-curl -o 基准_p50_hourly.csv "http://127.0.0.1:8000/api/load-model/runs/download?job_id=f71037c73c144c78a81dbc3b5e673f5d"
-```
+负荷特性预测集成版;subprocess 调 conda load_forecast 锁定环境跑 `refactor/load_forecast/pipeline.py`(约 3 分钟),目标年 2030 固定。三端点与课题1 契约一致(job_id/英文状态名/统一壳),前缀不同。
 
-返回 CSV 文件(UTF-8),两列:`timestamp`(逐时时刻)与 `load_pu`(指定情景 P50 轨迹标幺负荷,年最大=1),文件名 `{情景}_p50_hourly.csv`;默认参数下 52,584 行(2025—2030,含闰年 2028 的 8784 行)。
+#### 创建运行 `POST /api/load-forecast/runs/create`
 
-### 7.5 课题2 接口 `/api/load-forecast/runs`(2026-10-23,S13)
-
-四端点与课题1 契约一致(job_id/英文状态名/统一壳),前缀不同;算法在 conda load_forecast 锁定环境以 subprocess 跑 `refactor/load_forecast/pipeline.py`(约 3 分钟),目标年 2030 固定,除三件文件外无其他参数。
-
-**创建运行** `POST /api/load-forecast/runs/create` —— **传参**(multipart/form-data,文件以 binary 传,三件全必传):
+**传参**(multipart/form-data,文件以 binary 传,三件全必传):
 
 ```
 macro_workbook: binary     #必填;宏观工作簿(.xlsx,即 111.xlsx),首表 1 行表头+8 行指标(1996—2025),首列为指标名
@@ -253,7 +251,7 @@ curl -X POST "http://127.0.0.1:8000/api/load-forecast/runs/create" \
   -F "industry_load=@行业历史负荷.xlsx"
 ```
 
-**return**(创建即受理,计算转后台;结构同 §7.1):
+**return**(创建即受理,计算转后台;结构同课题1 创建运行):
 
 ```json
 {
@@ -266,14 +264,18 @@ curl -X POST "http://127.0.0.1:8000/api/load-forecast/runs/create" \
 }
 ```
 
-**状态轮询** `GET /api/load-forecast/runs/status?job_id=<任务标识>` —— 返回结构与字段含义同 §7.2(`status`: queued/running/succeeded/failed;`error` 仅 failed 时非空,如"课题2 算法执行失败:RuntimeError: 居民生活/2022: expected 8760 rows, got 5(明细见 …/pipeline.log)")。**不传 job_id 返回课题2 最近 5 条历史任务状态列表**(create_time 倒序,元素结构同单查):
+#### 状态轮询 `GET /api/load-forecast/runs/status?job_id=<任务标识>`
+
+返回结构与字段含义同课题1 状态轮询(`status`: queued/running/succeeded/failed;`error` 仅 failed 时非空,如"课题2 算法执行失败:RuntimeError: 居民生活/2022: expected 8760 rows, got 5(明细见 …/pipeline.log)")。**不传 job_id 返回课题2 最近 5 条历史任务状态列表**(create_time 倒序,元素结构同单查):
 
 ```bash
 curl "http://127.0.0.1:8000/api/load-forecast/runs/status"
 # → {"data": [{"job_id": "…", "status": "succeeded", "error": null}, {"job_id": "…", "status": "failed", "error": "课题2 算法执行失败:…"}, …最近 5 条]}
 ```
 
-**结果查看** `GET /api/load-forecast/runs/results?job_id=<任务标识>` —— 返回 `views` 固定三组:总负荷一张、行业 MW 一张、行业标幺一张(行业两视图列名=行业名,列序=9 行业标准名+其他殿后;index 均 8760 个 2030 逐时时刻;JSON 值与结果 CSV 逐位一致;状态非 succeeded 时 409,见 §7.6):
+#### 结果查看 `GET /api/load-forecast/runs/results?job_id=<任务标识>`
+
+返回 `views` 固定三组:总负荷一张、行业 MW 一张、行业标幺一张(行业两视图列名=行业名,列序=9 行业标准名+其他殿后;index 均 8760 个 2030 逐时时刻;JSON 值与结果 CSV 逐位一致;状态非 succeeded 时 409,见 §7.3):
 
 ```json
 {
@@ -315,14 +317,7 @@ curl "http://127.0.0.1:8000/api/load-forecast/runs/status"
 }
 ```
 
-**结果下载** `GET /api/load-forecast/runs/download?job_id=<任务标识>&file=<total|industry>` —— `file=total`(默认)返回 `2030总负荷_MW及标幺8760.csv`(三列:时间、总负荷MW、总负荷标幺值);`file=industry` 返回 `2030行业标幺及MW8760_汇总.csv`(时间+10 行业×{标幺值,MW} 共 21 列,列名形如 `居民生活_标幺值`/`居民生活_MW`):
-
-```bash
-curl -o 总负荷.csv "http://127.0.0.1:8000/api/load-forecast/runs/download?job_id=<任务标识>&file=total"
-curl -o 行业汇总.csv "http://127.0.0.1:8000/api/load-forecast/runs/download?job_id=<任务标识>&file=industry"
-```
-
-### 7.6 错误映射
+### 7.3 错误映射
 
 课题1/课题2 接口共用:
 
@@ -348,7 +343,7 @@ curl -o 行业汇总.csv "http://127.0.0.1:8000/api/load-forecast/runs/download?
 <!-- 服务层 -->
 
 [6] service/start.py 服务启动入口
-[7] service/api/routers/run_router.py 服务路由(创建/轮询/结果查看/下载四端点)
+[7] service/api/routers/run_router.py 课题1 服务路由(创建/轮询/结果查看/下载)
 [8] service/core/manager/run_manager.py 运行组织与算法包唯一调用方
-[9] service/api/routers/forecast_router.py 课题2 服务路由(同四端点)
+[9] service/api/routers/forecast_router.py 课题2 服务路由(同款四端点)
 [10] service/core/manager/forecast_run_manager.py 课题2 运行组织(subprocess 调 load_forecast 环境)
