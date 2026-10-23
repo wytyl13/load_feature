@@ -13,13 +13,18 @@
 环境安装(conda):
 
 ```bash
-# 环境一:日常运行与课题2 全链路,直接用 anaconda base(Python 3.12.7,依赖已齐)
+# 环境一:日常运行与课题2 旧交付包(课题2_预测)全链路,直接用 anaconda base(Python 3.12.7,依赖已齐)
 conda activate base
 
 # 环境二:课题1 回归与服务层(逐位一致判据只在锁定版本内成立)
 conda create -n load_feature python=3.13
 conda activate load_feature
 pip install -r requirements.txt
+
+# 环境三:课题2 集成版重构(refactor/load_forecast,锁定版本)
+conda create -n load_forecast python=3.12
+conda activate load_forecast
+pip install -r refactor/load_forecast/requirements.txt
 ```
 
 课题1 回归与算例(重构版 `refactor/load_model/`;原始交付 `课题1_主模型/` 留作参照):
@@ -32,14 +37,15 @@ python run_example.py --output-dir results/<目录>                      # 快�
 python run_formal_2025_2060.py --end-year 2030 --output-dir <新目录>   # 正式(1000 抽样)
 ```
 
-课题2 环境检查与全链路(重构版 `refactor/load_forecast/`,数据已内置;原始交付 `课题2_预测/` 留作参照):
+课题2 全链路(集成版重构 `refactor/load_forecast/`,S12;原始交付 `负荷特性预测_软件集成版_20261022/` 留参照;旧交付 `课题2_预测/` 及其重构历史见 git/DESIGN §4.3—§4.5):
 
 ```bash
-conda activate load_feature
-$env:PYTHONNOUSERSITE = "1"   # 本会话生效;user-site pandas 3.0.5 与 statsmodels 0.14.2 冲突(DESIGN D13)
+conda activate load_forecast
 cd refactor/load_forecast
-python 10_扩展行业/check_environment.py   # 环境检查
-python run_delivery.py                     # 一键全链路(--skip-arima 跳过电量训练)
+python pipeline.py --macro-xlsx inputs/111.xlsx \
+    --energy-xlsx inputs/行业电量简表.xlsx \
+    --load-xlsx inputs/行业历史负荷.xlsx \
+    --output-dir outputs/<新目录>          # 六步链,2030 总电量 10159.7817 亿kWh
 ```
 
 服务层启动(FastAPI,封装 refactor/load_model;前两行首次执行一次):
@@ -59,22 +65,23 @@ python start.py --port 8000                   # 启动,默认 127.0.0.1:8000
 ```
 服务层   service/ start.py(FastAPI):上传 Excel → 后台调 run_pipeline → 轮询状态 → 下载结果 CSV
            ↓ 只调算法包唯一入口 run_pipeline(editable 安装)
-入口层   run_tests.py / run_example.py / run_formal_2025_2060.py   run_delivery.py / check_environment.py / run_original_extensions.py
+入口层   run_tests.py / run_example.py / run_formal_2025_2060.py   pipeline.py(--macro-xlsx/--energy-xlsx/--load-xlsx/--output-dir)
            ↓                                                     ↓
-模块层   refactor/load_model(主模型包;课题1_主模型 留参照)     refactor/load_forecast(五子链;课题2_预测 留参照)
+模块层   refactor/load_model(主模型包;课题1_主模型 留参照)     refactor/load_forecast(六步链;集成版 20261022 留参照)
            ↓                                                     ↓
-数据层   inputs/(随包) + 上游 JSON                              数据内置(02—06、09 目录)
+数据层   inputs/(随包) + 上游 JSON                              三件 Excel(111/行业电量简表/行业历史负荷,输入简化见 DESIGN D18)
            ↓                                                     ↓
-结果层   results/(68 表 + 逐时 parquet + 校验 JSON)              预测结果_2020-2030/ 与曲线目录
+结果层   results/(68 表 + 逐时 parquet + 校验 JSON)              outputs/<run>/(02—06 段目录 + 标幺/MW 8760 汇总 + 最终校验)
 ```
 
-| 模块         | 职责                                                           | 编写规则                     |
-| ------------ | -------------------------------------------------------------- | ---------------------------- |
-| 课题1_主模型 | 电量→小时分配:典型日演化 + Bootstrap 不确定性(留参照)         | `.claude/skills/` 通用规则 |
-| 课题2_预测   | 原始统计→年度电量→8760 曲线全链路(留参照)                    | 同上                         |
-| refactor/    | 课题1/课题2 代码级重构正典,行为与原始交付零差异(S8/S10)        | `algo-porting`             |
+| 模块         | 职责                                                               | 编写规则                     |
+| ------------ | ------------------------------------------------------------------ | ---------------------------- |
+| 课题1_主模型 | 电量→小时分配:典型日演化 + Bootstrap 不确定性(留参照)             | `.claude/skills/` 通用规则 |
+| 课题2_预测   | 2026-10-20 自包含交付包:统计→年度电量→8760 曲线全链路(留参照)     | 同上                         |
+| 负荷特性预测_软件集成版_20261022 | 课题2 软件集成正典,六步链(留参照,git 不入)        | 同上                         |
+| refactor/    | 课题1/课题2 代码级重构正典,行为与原始交付零差异(S8/S12)            | `algo-porting`             |
 | service/     | HTTP 服务层:上传校验→模板转 JSON→后台算法→指定情景 P50 结果提取 | `service-api`              |
-| baselines/   | 基准 md5 底册(重构/移植回归判据)                               | `algo-porting` §4         |
+| baselines/   | 基准 md5 底册(重构/移植回归判据)                                   | `algo-porting` §4         |
 
 ## 4 算法全流程
 
@@ -91,7 +98,7 @@ python start.py --port 8000                   # 启动,默认 127.0.0.1:8000
 | 5 Bootstrap    | 逐时曲线                          | 每年每情景 1000 轨迹(块长 7,固定种子)                        | 轨迹与分位     | 主模型包 [1] |
 | 6 输出与校验   | 全部结果                          | 68 表 + 逐时 parquet + 展示子集 + 独立发布校验               | results/       | 主模型包 [1] |
 
-课题2 主链(依据 `DESIGN.md` §4.3):01 电量预测(`01_电量预测/`,ARIMA+MLP)→ 02 气温敏感性(`03_气温敏感性/`,基温/CDD/HDD 三情景)→ 03 曲线生成(`07_8760曲线/`,行业标幺 × 目标年电量 → MW)→ 04 结果分析(`08_结果分析/`,只读)→ 05 扩展行业(`10_扩展行业/`,数据中心/充换电独立子链 + 恒等式校验)。逐步输入输出明细见 `refactor/load_forecast/README.md`。
+课题2 主链(软件集成版,依据 `DESIGN.md` §4.6):02 宏观特征预测(ARIMA 递归外推 2026—2030)→ 03 总电量与行业电量(MLP×5 种子集成 + 占比趋势外推)→ 04 历史负荷校验标准化 → 05 周法标幺 8760(周峰×日峰×典型日三层)→ 06 MW 换算与总负荷合成(电量闭合 12 项校验)。旧交付包五子链(电量/气温/曲线/分析/扩展)见 `DESIGN.md` §4.3。
 
 ## 5 分实体明细
 
@@ -100,9 +107,9 @@ python start.py --port 8000                   # 启动,默认 127.0.0.1:8000
 | 类型     | 模块     | 实体                                                                                    |
 | -------- | -------- | --------------------------------------------------------------------------------------- |
 | 输入     | 课题1    | 副本山东负荷特性8760数据表、用电分类表、annual_energy_upstream.json、三份 config CSV    |
-| 输入     | 课题2    | 111.xlsx、用电分类表、行业小时曲线、用户级曲线、数据中心 15 分钟 Excel、生成器输入      |
+| 输入     | 课题2    | 集成版三件:111.xlsx、行业电量简表(由分类表提取)、行业历史负荷单文件 10 sheet(由 10 目录合并) |
 | 计算单元 | 课题1    | 24 传统行业 + 1 修正组成(形状演化、年度装配、Bootstrap)                                 |
-| 计算单元 | 课题2    | 五个子链(电量、温度、曲线、分析、扩展行业;目录 01/03/07/08/10)                          |
+| 计算单元 | 课题2    | 集成版六步链(宏观 ARIMA/MLP 电量/负荷校验/周法标幺/MW 合成;旧包五子链留参照)          |
 | 约束     | 两模块   | 统一口径见`DESIGN.md` §7(单位换算、标幺、自然负荷、timestamp 无时区)                 |
 | 服务层   | service/ | 运行记录(runs 表)、上传文件(用户曲线/行业电量/年度电量模板)、结果 CSV;实体明细见第 7 章 |
 
@@ -110,19 +117,19 @@ python start.py --port 8000                   # 启动,默认 127.0.0.1:8000
 
 > 本章列输出文件与产出模块。
 
-| 文件/目录                                            | 内容                                                                  | 产出模块 |
-| ---------------------------------------------------- | --------------------------------------------------------------------- | -------- |
-| 课题1_主模型/results/<运行>/数据表/                  | 68 张结果表(形状、装配、轨迹、分位、校验)                             | 课题1    |
-| 课题1_主模型/results/<运行>/逐时曲线/                | 省级逐时标幺轨迹 parquet                                              | 课题1    |
-| 课题1_主模型/results/<运行>/正式调用_2030-2030/      | 平台调用子集                                                          | 课题1    |
-| 课题1_主模型/results/example_01/                     | 开发验收算例基准(列集冻结,md5 见 baselines/)                          | 课题1    |
-| 课题2_预测/预测结果_2020-2030/                       | 电量预测 xlsx 与 2020/2021/2023/2030 行业 8760                        | 课题2    |
-| 课题2_预测/2030行业有名值曲线/ 等                    | 2030 行业标幺/有名值/剩余曲线(含校验,见 DESIGN §4.4)                 | 课题2    |
-| baselines/*.md5                                      | 基准与源码校验和底册                                                  | 本项目   |
+| 文件/目录                                          | 内容                                                                           | 产出模块 |
+| -------------------------------------------------- | ------------------------------------------------------------------------------ | -------- |
+| 课题1_主模型/results/<运行>/数据表/                | 68 张结果表(形状、装配、轨迹、分位、校验)                                      | 课题1    |
+| 课题1_主模型/results/<运行>/逐时曲线/              | 省级逐时标幺轨迹 parquet                                                       | 课题1    |
+| 课题1_主模型/results/<运行>/正式调用_2030-2030/    | 平台调用子集                                                                   | 课题1    |
+| 课题1_主模型/results/example_01/                   | 开发验收算例基准(列集冻结,md5 见 baselines/)                                   | 课题1    |
+| 课题2_预测/预测结果_2020-2030/                     | 电量预测 xlsx 与 2020/2021/2023/2030 行业 8760(旧交付包,留参照)              | 课题2    |
+| refactor/load_forecast/outputs/<run>/              | 集成版重构输出:02—06 段目录、行业标幺/MW 8760 汇总、总负荷曲线、最终校验(S12)  | 课题2    |
+| baselines/*.md5                                    | 基准与源码校验和底册                                                           | 本项目   |
 | service/runs/<run_id>/result/{情景}_p50_hourly.csv | 指定情景(默认基准)P50 逐时标幺曲线(timestamp, load_pu;2025—2030 共 52,584 行) | 服务层   |
-| service/templates/annual_energy.xlsx                 | 年度电量模板(两张 sheet,列名=上游 JSON 键原样)                        | 服务层   |
+| service/templates/annual_energy.xlsx               | 年度电量模板(两张 sheet,列名=上游 JSON 键原样)                                 | 服务层   |
 
-注:`refactor/load_model/results/` 与 `refactor/load_forecast/` 同构产出上表课题1/课题2 文件(正典运行入口,见第 2 章);service 端结果在 `service/runs/<run_id>/` 下,不与课题1 结果混放。
+注:`refactor/load_model/results/` 同构产出上表课题1 文件;`refactor/load_forecast/`(集成版)产出上表课题2 重构行;service 端结果在 `service/runs/<run_id>/` 下,不与课题1 结果混放。
 
 ## 7 接口
 
