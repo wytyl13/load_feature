@@ -178,11 +178,10 @@ curl -X POST http://127.0.0.1:8000/api/load-model/runs/create \
 
 #### 状态轮询 `GET /api/load-model/runs/status?job_id=<任务标识>`
 
-**传参**:查询参数 `job_id`(可选;创建运行返回的任务标识)。不传则返回该课题最近 5 条历史任务状态列表(`data` 为数组,create_time 倒序,元素结构与单查相同,2026-10-23 增,课题2 同款见 §7.2):
+**传参**:查询参数 `job_id`(创建运行返回的任务标识;不传则进入下节历史任务模式,2026-10-23 增):
 
 ```bash
 curl "http://127.0.0.1:8000/api/load-model/runs/status?job_id=f71037c73c144c78a81dbc3b5e673f5d"
-curl "http://127.0.0.1:8000/api/load-model/runs/status"   # → {"data": [{"job_id": …, "status": …, "error": …}, …最近 5 条]}
 ```
 
 **return**(succeeded 示例):
@@ -197,6 +196,29 @@ curl "http://127.0.0.1:8000/api/load-model/runs/status"   # → {"data": [{"job_
     "error": null     // 必返;失败原因,仅 failed 时非空
   },
   "timestamp": "2026-10-21T16:00:12"  // 必返;响应时刻(ISO 格式,精确到秒)
+}
+```
+
+#### 查看历史任务 `GET /api/load-model/runs/status`(不传 job_id)
+
+返回课题1 最近 5 条历史任务状态(`data` 为数组,create_time 倒序,每元素结构与单查相同;不足 5 条按实际条数返回):
+
+```bash
+curl "http://127.0.0.1:8000/api/load-model/runs/status"
+```
+
+**return**(示例,当前库 3 条):
+
+```json
+{
+  "success": true,    // 必返;true 成功/false 失败
+  "message": "",      // 必返;失败为可直接展示的中文原因
+  "data": [
+    {"job_id": "5a845924fa244d04b95fd8bb26dd08cb", "status": "succeeded", "error": null},
+    {"job_id": "ebe0f61fb5984cada34ffb6294367cf1", "status": "succeeded", "error": null},
+    {"job_id": "f71037c73c144c78a81dbc3b5e673f5d", "status": "succeeded", "error": null}
+  ],
+  "timestamp": "2026-10-23T16:05:51"  // 必返;响应时刻(ISO 格式,精确到秒)
 }
 ```
 
@@ -266,11 +288,34 @@ curl -X POST "http://127.0.0.1:8000/api/load-forecast/runs/create" \
 
 #### 状态轮询 `GET /api/load-forecast/runs/status?job_id=<任务标识>`
 
-返回结构与字段含义同课题1 状态轮询(`status`: queued/running/succeeded/failed;`error` 仅 failed 时非空,如"课题2 算法执行失败:RuntimeError: 居民生活/2022: expected 8760 rows, got 5(明细见 …/pipeline.log)")。**不传 job_id 返回课题2 最近 5 条历史任务状态列表**(create_time 倒序,元素结构同单查):
+返回结构与字段含义同课题1 状态轮询(`status`: queued/running/succeeded/failed;`error` 仅 failed 时非空,如"课题2 算法执行失败:RuntimeError: 居民生活/2022: expected 8760 rows, got 5(明细见 …/pipeline.log)");不传 job_id 则进入下节历史任务模式:
+
+```bash
+curl "http://127.0.0.1:8000/api/load-forecast/runs/status?job_id=<任务标识>"
+```
+
+#### 查看历史任务 `GET /api/load-forecast/runs/status`(不传 job_id)
+
+返回课题2 最近 5 条历史任务状态(`data` 为数组,create_time 倒序,每元素结构与单查相同;不足 5 条按实际条数返回):
 
 ```bash
 curl "http://127.0.0.1:8000/api/load-forecast/runs/status"
-# → {"data": [{"job_id": "…", "status": "succeeded", "error": null}, {"job_id": "…", "status": "failed", "error": "课题2 算法执行失败:…"}, …最近 5 条]}
+```
+
+**return**(示例,当前库 3 条,含一条 failed):
+
+```json
+{
+  "success": true,
+  "message": "",
+  "data": [
+    {"job_id": "34407cdacd3648a99a5176175478170a", "status": "succeeded", "error": null},
+    {"job_id": "da5afdbc685e40a093c3339863e2c572", "status": "failed",
+     "error": "课题2 算法执行失败:RuntimeError: 居民生活/2022: expected 8760 rows, got 5(明细见 …/pipeline.log)"},
+    {"job_id": "4073d44f9a044ff083e0510fa5498e51", "status": "succeeded", "error": null}
+  ],
+  "timestamp": "2026-10-23T16:05:51"
+}
 ```
 
 #### 结果查看 `GET /api/load-forecast/runs/results?job_id=<任务标识>`
