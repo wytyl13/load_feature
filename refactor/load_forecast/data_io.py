@@ -19,6 +19,10 @@ FEATURES = [
 ]
 TARGET = "电力消费量"
 
+TOTAL_KEY = "全社会用电总计"
+ENERGY_SHEET = "行业电量"
+ENERGY_COLUMNS = [f"{year}年" for year in range(2020, 2026)]
+
 
 def load_macro_table(path: Path) -> pd.DataFrame:
     """读取111.xlsx并整理为“年份×指标”的数值表。
@@ -34,3 +38,22 @@ def load_macro_table(path: Path) -> pd.DataFrame:
     frame.index = years
     frame.index.name = "年份"
     return frame.sort_index().apply(pd.to_numeric, errors="coerce").interpolate(limit_direction="both")
+
+
+def load_industry_energy(path: Path, industries: list[str]) -> pd.DataFrame:
+    """读行业电量简表.xlsx → 以行业名为索引的 (10, 6) 电量表(万千瓦时, float64)。
+
+    简表替代原 150 行分类表 + unique_row 定位;值已经生成工具 round-trip
+    逐位断言与原表一致。行标签须恰好为 总计+9 行业(顺序不限,输出序由
+    config.industries 派生)。
+    """
+    frame = pd.read_excel(path, sheet_name=ENERGY_SHEET, header=0)
+    if list(frame.columns) != ["行业", *ENERGY_COLUMNS]:
+        raise RuntimeError(f"行业电量简表列异常: {list(frame.columns)}")
+    labels = list(frame["行业"].astype(str))
+    expected = [TOTAL_KEY, *industries]
+    if sorted(labels) != sorted(expected) or len(set(labels)) != len(labels):
+        raise RuntimeError(f"行业电量简表行标签异常: {labels}(应为 {expected})")
+    frame = frame.set_index("行业")
+    frame.index = frame.index.astype(str)
+    return frame.apply(pd.to_numeric, errors="raise")
