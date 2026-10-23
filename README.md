@@ -127,6 +127,7 @@ python start.py --port 8000                   # 启动,默认 127.0.0.1:8000
 | refactor/load_forecast/outputs/<run>/              | 集成版重构输出:02—06 段目录、行业标幺/MW 8760 汇总、总负荷曲线、最终校验(S12)  | 课题2    |
 | baselines/*.md5                                    | 基准与源码校验和底册                                                           | 本项目   |
 | service/runs/<run_id>/result/{情景}_p50_hourly.csv | 指定情景(默认基准)P50 逐时标幺曲线(timestamp, load_pu;2025—2030 共 52,584 行) | 服务层   |
+| service/runs/<run_id>/result/2030*.csv             | 课题2 两张结果:2030总负荷_MW及标幺8760 / 2030行业标幺及MW8760_汇总(与冻结基准逐位一致) | 服务层 |
 | service/templates/annual_energy.xlsx               | 年度电量模板(两张 sheet,列名=上游 JSON 键原样)                                 | 服务层   |
 
 注:`refactor/load_model/results/` 同构产出上表课题1 文件;`refactor/load_forecast/`(集成版)产出上表课题2 重构行;service 端结果在 `service/runs/<run_id>/` 下,不与课题1 结果混放。
@@ -230,7 +231,30 @@ curl -o 基准_p50_hourly.csv "http://127.0.0.1:8000/api/load-model/runs/downloa
 
 返回 CSV 文件(UTF-8),两列:`timestamp`(逐时时刻)与 `load_pu`(指定情景 P50 轨迹标幺负荷,年最大=1),文件名 `{情景}_p50_hourly.csv`;默认参数下 52,584 行(2025—2030,含闰年 2028 的 8784 行)。
 
-### 7.5 错误映射
+### 7.5 课题2 接口 `/api/load-forecast/runs`(2026-10-23,S13)
+
+四端点与课题1 契约一致(job_id/英文状态名/统一壳),前缀不同;算法在 conda load_forecast 锁定环境以 subprocess 跑 `refactor/load_forecast/pipeline.py`(约 3 分钟),目标年 2030 固定,无额外参数。
+
+```bash
+# 创建运行:三件输入全必传(111.xlsx 宏观工作簿 / 行业电量简表 / 行业历史负荷,结构快检见 DESIGN §5.5)
+curl -X POST "http://127.0.0.1:8000/api/load-forecast/runs/create" \
+  -F "macro_workbook=@111.xlsx" \
+  -F "industry_energy=@行业电量简表.xlsx" \
+  -F "industry_load=@行业历史负荷.xlsx"
+# → {"success": true, "data": {"job_id": "<任务标识>"}}
+
+# 状态轮询 / 结果查看 / 结果下载
+curl "http://127.0.0.1:8000/api/load-forecast/runs/status?job_id=<任务标识>"
+curl "http://127.0.0.1:8000/api/load-forecast/runs/results?job_id=<任务标识>"
+curl -o 行业汇总.csv "http://127.0.0.1:8000/api/load-forecast/runs/download?job_id=<任务标识>&file=industry"
+```
+
+- `results` 返回 `views` 三组(均 `{year: 2030, sheet_name, index(8760 时间), data}`):`2030总负荷`(总负荷MW、总负荷标幺值)、`2030行业MW`、`2030行业标幺`(各 10 列,列名=行业名,序=9 行业标准名+其他殿后);JSON 值与结果 CSV 逐位一致
+- `download` 的 `file` 取 `total`(总负荷,默认)/`industry`(行业汇总)
+
+### 7.6 错误映射
+
+课题1/课题2 接口共用:
 
 | HTTP 状态码 | 触发条件                                            | message 内容                              |
 | ----------- | --------------------------------------------------- | ----------------------------------------- |
@@ -256,3 +280,5 @@ curl -o 基准_p50_hourly.csv "http://127.0.0.1:8000/api/load-model/runs/downloa
 [6] service/start.py 服务启动入口
 [7] service/api/routers/run_router.py 服务路由(创建/轮询/结果查看/下载四端点)
 [8] service/core/manager/run_manager.py 运行组织与算法包唯一调用方
+[9] service/api/routers/forecast_router.py 课题2 服务路由(同四端点)
+[10] service/core/manager/forecast_run_manager.py 课题2 运行组织(subprocess 调 load_forecast 环境)
