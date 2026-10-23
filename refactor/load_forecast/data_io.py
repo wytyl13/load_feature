@@ -57,3 +57,17 @@ def load_industry_energy(path: Path, industries: list[str]) -> pd.DataFrame:
     frame = frame.set_index("行业")
     frame.index = frame.index.astype(str)
     return frame.apply(pd.to_numeric, errors="raise")
+
+
+def load_industry_loads(path: Path) -> dict[str, pd.DataFrame]:
+    """读行业历史负荷.xlsx → {标准行业名: [时间(文本), 值(float)]}。
+
+    按 sheet 在工作簿中的顺序迭代(该顺序承载原包 sorted 目录序,
+    04 段审计行序由此派生);每 sheet 应为 2 年 8760×2=17520 行升序堆叠,
+    逐位一致已由生成工具 round-trip 断言,年份切分与数值校验留给 04 段。
+    """
+    sheets = pd.read_excel(path, sheet_name=None, header=0)
+    for name, sheet in sheets.items():
+        if list(sheet.columns) != ["时间", "值"]:
+            raise RuntimeError(f"负荷 sheet {name!r} 列异常: {list(sheet.columns)}(应为 [时间, 值])")
+    return dict(sheets)
