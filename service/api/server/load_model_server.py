@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.response import make_response
+from api.routers.forecast_router import router as forecast_router
 from api.routers.run_router import router as run_router
 from core.database import dispose_engine, init_db
 from core.exceptions import ConflictError, NotFoundError
@@ -104,3 +105,4 @@ async def health():
 
 
 app.include_router(run_router)
+app.include_router(forecast_router)

@@ -15,6 +15,7 @@ class RunCreateDTO(BaseModel):
     """创建运行记录的入参。"""
 
     run_id: str = Field(..., description="运行标识(uuid4 hex)")
+    topic: str = Field("load_model", description="课题标识(load_model 课题1/load_forecast 课题2)")
     params: dict = Field(..., description="运行参数(起始年/结束年/抽样数/原始文件名)")
     input_dir: str = Field(..., description="上传输入目录绝对路径")
     output_dir: str = Field(..., description="算法输出目录绝对路径")

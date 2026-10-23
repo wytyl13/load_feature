@@ -10,6 +10,7 @@
 
 from functools import lru_cache
 
+from core.manager.forecast_run_manager import ForecastRunManager
 from core.manager.run_manager import RunManager
 from core.service.run_service import RunService
 
@@ -32,3 +33,13 @@ def get_run_manager() -> RunManager:
         RunManager: manager 实例。
     """
     return RunManager(run_service=get_run_service())
+
+
+@lru_cache(maxsize=1)
+def get_forecast_manager() -> ForecastRunManager:
+    """课题2 运行组织 manager 单例(与课题1 共用 runs 表 service)。
+
+    Returns:
+        ForecastRunManager: manager 实例。
+    """
+    return ForecastRunManager(run_service=get_run_service())

@@ -50,6 +50,7 @@ class RunRecord(Base):
     __tablename__ = "runs"
 
     run_id: Mapped[str] = mapped_column(String(32), primary_key=True)       # 运行标识(uuid4 hex)
+    topic: Mapped[str] = mapped_column(String(32), default="load_model", server_default="load_model")  # 课题标识(load_model 课题1/load_forecast 课题2)
     params: Mapped[dict] = mapped_column(JSON)                              # 运行参数(起始年/结束年/抽样数/原始文件名)
     status: Mapped[int] = mapped_column(default=RunStatus.QUEUED)           # 状态,RunStatus 编码
     input_dir: Mapped[str] = mapped_column(String)                          # 上传输入目录(绝对路径)
